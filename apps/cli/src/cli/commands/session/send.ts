@@ -116,10 +116,10 @@ export async function cmdSessionSend(
   }
 
   if (json) {
-    await printJsonEnvelope({ ok: true, kind: 'session_send', data: { sessionId: result.sessionId, localId: result.localId, waited: result.waited } });
+    await printJsonEnvelope({ ok: true, kind: 'session_send', data: { sessionId: result.sessionId, localId: result.localId, waited: result.waited, ...(result.held === true ? { held: true } : {}) } });
     return;
   }
 
-  console.log(chalk.green('✓'), 'message sent');
-  await writeJsonStdout({ sessionId: result.sessionId, localId: result.localId }, { pretty: true });
+  console.log(chalk.green('✓'), result.held === true ? 'message queued while session input is held' : 'message sent');
+  await writeJsonStdout({ sessionId: result.sessionId, localId: result.localId, ...(result.held === true ? { held: true } : {}) }, { pretty: true });
 }

@@ -148,6 +148,7 @@ import { retireExactTerminalControlServiceability } from './sessions/retireTermi
 import { recoverStrandedTerminalControlServiceability } from './sessions/recoverStrandedTerminalControlServiceability';
 import { waitForVisibleConsoleSessionWebhook } from './sessions/visibleConsoleSpawnWaiter';
 import { createStopSession } from './sessions/stopSession';
+import { createSessionInputHoldStore } from './sessionInputHold/sessionInputHoldStore';
 import {
   isTerminalHostPhysicallyRetiredStopResult,
   type StopSessionResult,
@@ -405,6 +406,7 @@ import { startConnectedServiceMaterializedHomeCleanupLoop } from './connectedSer
 import { isConnectedServiceAuthGroupUnavailableError } from '@/api/connectedServices/connectedServiceCredentialApi';
 import {
   ConnectedServiceCredentialRecordV1Schema,
+  ConnectedServiceBindingsV1Schema,
   CONNECTED_SERVICE_UX_DIAGNOSTIC_CODES,
   ConnectedServiceIdSchema,
   RestartAllSessionRunnersResultV1Schema,
@@ -500,6 +502,9 @@ import { readCredentialAccountIdentity } from './connectedServices/quotas/coordi
 import { startConnectedServiceStableHomeReconcileScheduler } from './connectedServices/startup/stableHomeReconcile';
 import { tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
 import { sendSessionMessage } from '@/session/services/sendSessionMessage';
+import { buildInactiveSessionResumeSpawnOptions } from './sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
+import { listPendingQueueV2UserLocalIdsFromServer, readPendingQueueV2ActivationEligibilityFromServer } from '@/api/session/pendingQueueV2Transport';
+import { readControlledSessionEvidence } from './sessionInputHold/controlledSessionEvidence';
 
 function resolvePositiveIntEnv(raw: string | undefined, fallback: number, bounds: { min: number; max: number }): number {
   const value = (raw ?? '').trim();
@@ -1590,6 +1595,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
   } = createDaemonShutdownController();
 
   logger.debug('[DAEMON RUN] Starting daemon process...');
+  const sessionInputHoldStore = createSessionInputHoldStore(configuration.activeServerDir);
   logger.debugLargeJson('[DAEMON RUN] Environment', getEnvironmentInfo());
   const diagnosticSubsystemGates = resolveDaemonDiagnosticSubsystemGates(process.env);
 
@@ -6478,6 +6484,16 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       }
     };
 
+    // Two controlled resumes for the same stopped Session must share one spawn.
+    // The durable hold survives daemon restart; this map only closes the live
+    // check-then-spawn race inside one daemon process.
+    type ControlledResumeResult = Readonly<{
+      ok: boolean; status?: 'started' | 'pending'; error?: string;
+    }>;
+    const controlledResumeFlights = new Map<string, {
+      actionId: string; promise: Promise<ControlledResumeResult>;
+    }>();
+
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
@@ -6491,6 +6507,148 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       beforeShutdown,
       onHappySessionWebhook,
       controlToken,
+      handleSessionInputHold: ({ sessionId, actionId, operation }) => {
+        if (operation === 'status') {
+          const state = sessionInputHoldStore.status(sessionId);
+          return { ok: state?.actionId === actionId, held: state?.held === true };
+        }
+        const ok = operation === 'hold'
+          ? sessionInputHoldStore.hold(sessionId, actionId)
+          : sessionInputHoldStore.release(sessionId, actionId);
+        return { ok, held: sessionInputHoldStore.isHeld(sessionId) };
+      },
+      handleSessionControlledSend: async ({ sessionId, actionId, kind, phase, text }) => {
+        const fence = sessionInputHoldStore.status(sessionId);
+        if (!fence || fence.actionId !== actionId || fence.held !== (phase === 'admit')) {
+          return { ok: false, error: 'action_fence_mismatch' };
+        }
+        if (kind === 'continue' && !text?.trim()) {
+          return { ok: false, error: 'controlled_send_phase_invalid' };
+        }
+        const localId = `usage-${actionId}-${kind}`;
+        const sent = await sendSessionMessage({
+          credentials: (await readCredentials()) ?? credentials,
+          idOrPrefix: sessionId,
+          message: kind === 'compact' ? '/compact' : text!,
+          localId,
+          wait: false,
+          timeoutMs: 10_000,
+          resumeInactiveSession: phase === 'wake',
+          ...(kind === 'compact'
+            ? { pendingAdmissionMode: 'continuation_if_no_queued_user_input' as const } : {}),
+        });
+        if (!sent.ok) return { ok: false, error: sent.code };
+        return { ok: true, localId, ...(sent.suppressed ? { suppressed: true } : {}) };
+      },
+      handleSessionControlledResume: ({ sessionId, actionId, profileId, bindingGeneration }) => {
+        const existing = controlledResumeFlights.get(sessionId);
+        if (existing) {
+          return existing.actionId === actionId
+            ? existing.promise : Promise.resolve({ ok: false, error: 'other_action_resuming' });
+        }
+        const promise = (async (): Promise<ControlledResumeResult> => {
+        const fence = sessionInputHoldStore.status(sessionId);
+        if (!fence?.held || fence.actionId !== actionId) {
+          return { ok: false, error: 'action_fence_mismatch' };
+        }
+        const currentCredentials = (await readCredentials()) ?? credentials;
+        const raw = await fetchSessionByIdCompat({ token: currentCredentials.token, sessionId });
+        if (!raw || raw.id !== sessionId || raw.archivedAt != null) {
+          return { ok: false, error: 'session_unavailable' };
+        }
+        const metadataRaw = tryDecryptSessionMetadata({ credentials: currentCredentials, rawSession: raw });
+        const metadata = metadataRaw && typeof metadataRaw === 'object' && !Array.isArray(metadataRaw)
+          ? metadataRaw as Record<string, unknown> : null;
+        if (!metadata) return { ok: false, error: 'metadata_unavailable' };
+        const parsed = ConnectedServiceBindingsV1Schema.safeParse(metadata.connectedServices);
+        const selected = parsed.success ? parsed.data.bindingsByServiceId['claude-subscription'] : undefined;
+        if (selected?.source !== 'connected' || selected.selection !== 'profile'
+            || selected.profileId !== profileId
+            || metadata.connectedServicesUpdatedAt !== bindingGeneration) {
+          return { ok: false, error: 'binding_changed' };
+        }
+        const localId = `usage-${actionId}-continue`;
+        const eligibility = await readPendingQueueV2ActivationEligibilityFromServer({
+          token: currentCredentials.token, sessionId, requestId: localId,
+        });
+        if (eligibility !== 'eligible') return { ok: false, error: 'continuation_not_pending' };
+        if (raw.active === true) {
+          const target = connectedServiceRuntimeRegistry.getBySessionId(sessionId);
+          const current = target?.activeBindings.find((item) => item.serviceId === 'claude-subscription');
+          return current?.profileId === profileId && target?.agentId === 'claude'
+            ? { ok: true, status: 'started' }
+            : { ok: false, error: 'active_runtime_binding_mismatch' };
+        }
+        const options = buildInactiveSessionResumeSpawnOptions({
+          sessionId, rawSession: raw, metadata,
+          executionAuthorization: { provenance: 'user_request', requestId: localId },
+          ...(typeof raw.seq === 'number' ? { initialTranscriptAfterSeq: raw.seq } : {}),
+        });
+        if (!options || options.existingSessionId !== sessionId || options.machineId !== machineId
+            || options.backendTarget?.kind !== 'builtInAgent'
+            || options.backendTarget.agentId !== 'claude') {
+          return { ok: false, error: 'resume_identity_unavailable' };
+        }
+        const result = await spawnSession(options);
+        if (result.type !== 'success') return { ok: false, error: 'controlled_spawn_failed' };
+        if (result.sessionId && result.sessionId !== sessionId) {
+          return { ok: false, error: 'resume_session_mismatch' };
+        }
+        return { ok: true, status: result.sessionId ? 'started' : 'pending' };
+        })();
+        controlledResumeFlights.set(sessionId, { actionId, promise });
+        void promise.finally(() => {
+          if (controlledResumeFlights.get(sessionId)?.promise === promise) {
+            controlledResumeFlights.delete(sessionId);
+          }
+        }).catch(() => undefined);
+        return promise;
+      },
+      handleSessionEvidenceRead: async (sessionId, afterSeq) => readControlledSessionEvidence({
+        credentials: (await readCredentials()) ?? credentials, sessionId, afterSeq,
+      }),
+      handleSessionBindingSnapshot: async (sessionId) => {
+        const currentCredentials = (await readCredentials()) ?? credentials;
+        const raw = await fetchSessionByIdCompat({ token: currentCredentials.token, sessionId });
+        if (!raw || raw.id !== sessionId) throw new Error('Session binding snapshot unavailable');
+        const metadata = tryDecryptSessionMetadata({ credentials: currentCredentials, rawSession: raw });
+        const record = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+          ? metadata as Record<string, unknown> : {};
+        const parsed = ConnectedServiceBindingsV1Schema.safeParse(record.connectedServices);
+        const selected = parsed.success
+          ? parsed.data.bindingsByServiceId['claude-subscription'] : undefined;
+        const updatedAt = typeof record.connectedServicesUpdatedAt === 'number'
+          ? record.connectedServicesUpdatedAt : null;
+        const binding = selected?.source === 'connected' && selected.selection === 'profile'
+          ? { kind: 'profile' as const, profileId: selected.profileId, updatedAt }
+          : selected?.source === 'connected' && selected.selection === 'group'
+            ? { kind: 'group' as const, groupId: selected.groupId, updatedAt }
+            : { kind: 'unknown' as const, updatedAt };
+        const target = connectedServiceRuntimeRegistry.getBySessionId(sessionId);
+        const tracked = getCurrentChildren().find((child) => child.happySessionId === sessionId) ?? null;
+        const activeBinding = target?.activeBindings.find((item) => item.serviceId === 'claude-subscription');
+        const runtime = raw.active === true && target?.agentId === 'claude' && activeBinding
+          ? { pid: target.pid, profileId: activeBinding.profileId,
+              groupId: activeBinding.groupId, revision: target.revision }
+          : null;
+        const pendingLocalIds = await listPendingQueueV2UserLocalIdsFromServer({
+          token: currentCredentials.token, sessionId,
+        });
+        if (pendingLocalIds.length > 1000) throw new Error('Pending queue too large for binding snapshot');
+        return {
+          sessionId, observedAt: Date.now(),
+          serverUpdatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : null,
+          binding,
+          claudeSessionId: typeof record.claudeSessionId === 'string' ? record.claudeSessionId : null,
+          active: raw.active === true,
+          activeTurnId: typeof tracked?.activeTurnId === 'string' ? tracked.activeTurnId : null,
+          runtimeKnown: tracked !== null,
+          serverMessageSeq: typeof raw.lastMessageSeq === 'number' ? raw.lastMessageSeq : null,
+          pendingCount: typeof raw.pendingCount === 'number' ? raw.pendingCount : null,
+          pendingLocalIds,
+          runtime,
+        };
+      },
       handleExecutionRunConnectedServiceMaterialize: async (input) => {
         return await executionRunConnectedServicesBridge.materialize({
           runId: input.runId,
@@ -8303,6 +8461,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   },
                 }),
                 stopSession,
+                isSessionInputHeld: (sessionId) => sessionInputHoldStore.isHeld(sessionId),
                 isSessionActive: isSessionAlreadyRunning,
                 loadLocalSessionMetadata: loadLocalSessionMetadataForHandoff,
                 requestShutdown: () => {

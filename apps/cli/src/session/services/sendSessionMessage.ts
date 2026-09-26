@@ -41,7 +41,7 @@ import { resolveSessionMessagePermissionIntent } from './resolveSessionMessagePe
 import { resolveSessionUserMessageRequestedAction } from './resolveSessionUserMessageRequestedAction';
 
 export type SendSessionMessageResult =
-  | Readonly<{ ok: true; sessionId: string; localId: string; waited: boolean; suppressed?: true }>
+  | Readonly<{ ok: true; sessionId: string; localId: string; waited: boolean; suppressed?: true; held?: true }>
   | Readonly<{
       ok: false;
       /**
@@ -517,6 +517,11 @@ export async function sendSessionMessage(params: Readonly<{
       // The common wait path below observes exact materialization and terminal
       // evidence; resume acknowledgement alone is never provider acceptance.
     } else {
+      if (resumeResult.code === 'input_held') {
+        // Admission already persisted the exact localId. The hold deliberately prevents
+        // runtime startup; report queued custody without claiming that it was answered.
+        return { ok: true, sessionId, localId, waited: false, held: true };
+      }
       return {
         ok: false,
         code: resumeResult.code,

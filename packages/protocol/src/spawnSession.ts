@@ -83,6 +83,7 @@ export const SPAWN_SESSION_ERROR_DETAIL_KINDS = {
    * materialization identity during existing-session attach.
    */
   CONNECTED_SERVICE_UX_DIAGNOSTIC: 'connected_service_ux_diagnostic',
+  SESSION_INPUT_HELD: 'session_input_held',
 } as const;
 
 export type SpawnSessionErrorDetailKind =
@@ -116,7 +117,8 @@ export type ConnectedServiceUxDiagnosticSpawnErrorDetail = Readonly<{
 
 export type SpawnSessionErrorDetail =
   | ConnectedServiceResumeUnreachableSpawnErrorDetail
-  | ConnectedServiceUxDiagnosticSpawnErrorDetail;
+  | ConnectedServiceUxDiagnosticSpawnErrorDetail
+  | Readonly<{ kind: typeof SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD }>;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -328,14 +330,18 @@ export function isConnectedServiceUxDiagnosticSpawnErrorDetail(
 
 export function isSpawnSessionErrorDetail(value: unknown): value is SpawnSessionErrorDetail {
   return isConnectedServiceResumeUnreachableSpawnErrorDetail(value)
-    || isConnectedServiceUxDiagnosticSpawnErrorDetail(value);
+    || isConnectedServiceUxDiagnosticSpawnErrorDetail(value)
+    || (Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+      && (value as { kind?: unknown }).kind === SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD);
 }
 
 export function normalizeSpawnSessionErrorDetail(value: unknown): SpawnSessionErrorDetail | undefined {
   const detail = asRecord(value);
   if (!detail) return undefined;
   return normalizeConnectedServiceResumeUnreachableDetail(detail)
-    ?? normalizeConnectedServiceUxDiagnosticDetail(detail);
+    ?? normalizeConnectedServiceUxDiagnosticDetail(detail)
+    ?? (detail.kind === SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD
+      ? { kind: SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD } : undefined);
 }
 
 export type SpawnSessionResult =

@@ -1300,12 +1300,17 @@ describe('sendSessionMessage', () => {
         expect(requestInactiveSessionResume).not.toHaveBeenCalled();
     });
 
-    it('retains inactive custody and reports resume failure without an alternate wake or transcript commit', async () => {
+    it.each([
+      { code: 'timeout' as const, expected: { ok: false, code: 'timeout',
+        message: 'Machine resume acknowledgement timed out' } },
+      { code: 'input_held' as const, expected: { ok: true, sessionId: 'sess-1',
+        localId: 'local-timeout', waited: false, held: true } },
+    ])('retains inactive custody and reports $code without an alternate wake', async ({ code, expected }) => {
         const enqueuePendingQueueV2MessageViaHttp = vi.fn(async () => undefined);
         const callSessionRpc = vi.fn(async (params: { request: { selector: { localId: string } } }) => ({ ok: true, result: 'dispatch_issued', localId: params.request.selector.localId }));
         const requestInactiveSessionResume = vi.fn(async () => ({
             ok: false as const,
-            code: 'timeout' as const,
+            code,
             message: 'Machine resume acknowledgement timed out',
         }));
 
@@ -1338,11 +1343,7 @@ describe('sendSessionMessage', () => {
             localId: 'local-timeout',
             wait: false,
             timeoutMs: 1,
-        })).resolves.toEqual({
-            ok: false,
-            code: 'timeout',
-            message: 'Machine resume acknowledgement timed out',
-        });
+        })).resolves.toEqual(expected);
 
         expect(enqueuePendingQueueV2MessageViaHttp).toHaveBeenCalledTimes(1);
         expect(requestInactiveSessionResume).toHaveBeenCalledTimes(1);

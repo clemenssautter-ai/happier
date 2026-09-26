@@ -127,6 +127,38 @@ import { buildRuntimeAuthRecoveryKey } from './connectedServices/runtimeAuth/rec
 import { buildRuntimeAuthRecoveryAttemptTransitionLocalId } from './connectedServices/runtimeAuth/commitConnectedServiceRuntimeAuthRecoverySessionEvent';
 
 const DEFAULT_DAEMON_CONTROL_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
+const SessionBindingSnapshotSchema = z.object({
+  sessionId: z.string().min(1), observedAt: z.number(),
+  serverUpdatedAt: z.number().nullable(),
+  binding: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('profile'), profileId: z.string().min(1), updatedAt: z.number().nullable() }),
+    z.object({ kind: z.literal('group'), groupId: z.string().min(1), updatedAt: z.number().nullable() }),
+    z.object({ kind: z.literal('unknown'), updatedAt: z.number().nullable() }),
+  ]),
+  claudeSessionId: z.string().nullable(), active: z.boolean(),
+  activeTurnId: z.string().nullable(), runtimeKnown: z.boolean(),
+  serverMessageSeq: z.number().int().nonnegative().nullable(),
+  pendingCount: z.number().int().nonnegative().nullable(),
+  pendingLocalIds: z.array(z.string().min(1)).max(1000),
+  runtime: z.object({
+    pid: z.number().int().positive(), profileId: z.string().nullable(),
+    groupId: z.string().nullable(), revision: z.number().int().nonnegative(),
+  }).nullable(),
+});
+type SessionBindingSnapshot = z.infer<typeof SessionBindingSnapshotSchema>;
+const ControlledSessionEvidenceSchema = z.object({
+  sessionId: z.string().min(1), afterSeq: z.number().int().nonnegative(),
+  serverMessageSeq: z.number().int().nonnegative(),
+  pendingLocalIds: z.array(z.string().min(1)).max(1000),
+  rows: z.array(z.object({
+    seq: z.number().int().nonnegative(),
+    kind: z.enum(['user', 'assistant_output', 'task_complete', 'task_failed',
+      'compact_started', 'compact_completed', 'switch_event']),
+    localId: z.string().optional(), lifecycleId: z.string().optional(),
+    providerEventId: z.string().optional(), toProfileId: z.string().optional(),
+  })).max(1000),
+});
+type ControlledSessionEvidence = z.infer<typeof ControlledSessionEvidenceSchema>;
 const DAEMON_CONTROL_BODY_LIMIT_BYTES_ENV_KEY = 'HAPPIER_DAEMON_CONTROL_BODY_LIMIT_BYTES';
 const DAEMON_DIST_CLOSURE_FINGERPRINT_PATTERN = /^[a-f0-9]{16}$/;
 const DaemonDistClosureFingerprintSchema = z.string().regex(DAEMON_DIST_CLOSURE_FINGERPRINT_PATTERN);
@@ -362,6 +394,11 @@ export function createDaemonControlApp({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleSessionInputHold,
+  handleSessionControlledSend,
+  handleSessionControlledResume,
+  handleSessionEvidenceRead,
+  handleSessionBindingSnapshot,
   handleSessionRunnerRestart,
   handleSessionRunnerRestartAll,
   handleSessionRunnerStatusGet,
@@ -438,6 +475,18 @@ export function createDaemonControlApp({
     attemptId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleSessionInputHold?: (input: Readonly<{
+    sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
+  }>) => Readonly<{ ok: boolean; held: boolean }>;
+  handleSessionControlledSend?: (input: Readonly<{
+    sessionId: string; actionId: string; kind: 'compact' | 'continue';
+    phase: 'admit' | 'wake'; text?: string;
+  }>) => Promise<Readonly<{ ok: boolean; localId?: string; suppressed?: boolean; error?: string }>>;
+  handleSessionControlledResume?: (input: Readonly<{
+    sessionId: string; actionId: string; profileId: string; bindingGeneration: number;
+  }>) => Promise<Readonly<{ ok: boolean; status?: 'started' | 'pending'; error?: string }>>;
+  handleSessionEvidenceRead?: (sessionId: string, afterSeq: number) => Promise<ControlledSessionEvidence>;
+  handleSessionBindingSnapshot?: (sessionId: string) => Promise<SessionBindingSnapshot>;
   handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
   handleSessionRunnerRestartAll?: (
     input: RestartAllSessionRunnersRequestV1,
@@ -672,6 +721,132 @@ export function createDaemonControlApp({
     }
     const result = await handleSessionConnectedServiceAuthSwitch(request.body);
     return { ok: true as const, result };
+  });
+
+  typed.post('/session-input/hold', {
+    schema: {
+      body: z.object({
+        sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        actionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        operation: z.enum(['hold', 'release', 'status']),
+      }),
+      response: {
+        200: z.object({ ok: z.literal(true), held: z.boolean() }),
+        401: authSchema401,
+        409: z.object({ ok: z.literal(false), held: z.boolean() }),
+        501: z.object({ ok: z.literal(false), errorCode: z.literal('session_input_hold_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionInputHold) {
+      reply.code(501);
+      return { ok: false as const, errorCode: 'session_input_hold_unavailable' as const };
+    }
+    const result = handleSessionInputHold(request.body);
+    if (!result.ok) {
+      reply.code(409);
+      return { ok: false as const, held: result.held };
+    }
+    return { ok: true as const, held: result.held };
+  });
+
+  typed.post('/session-input/controlled-send', {
+    schema: {
+      body: z.object({
+        sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        actionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        kind: z.enum(['compact', 'continue']),
+        phase: z.enum(['admit', 'wake']),
+        text: z.string().min(1).max(8000).optional(),
+      }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), localId: z.string(), suppressed: z.boolean().optional() }),
+        401: authSchema401,
+        409: z.object({ ok: z.literal(false), error: z.string() }),
+        501: z.object({ ok: z.literal(false), error: z.literal('controlled_send_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionControlledSend) {
+      reply.code(501);
+      return { ok: false as const, error: 'controlled_send_unavailable' as const };
+    }
+    const result = await handleSessionControlledSend(request.body);
+    if (!result.ok || !result.localId) {
+      reply.code(409);
+      return { ok: false as const, error: result.error ?? 'controlled_send_rejected' };
+    }
+    return { ok: true as const, localId: result.localId,
+      ...(result.suppressed ? { suppressed: true } : {}) };
+  });
+
+  typed.post('/session-input/controlled-resume', {
+    schema: {
+      body: z.object({
+        sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        actionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        profileId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+        bindingGeneration: z.number().int().nonnegative(),
+      }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), status: z.enum(['started', 'pending']) }),
+        401: authSchema401,
+        409: z.object({ ok: z.literal(false), error: z.string() }),
+        501: z.object({ ok: z.literal(false), error: z.literal('controlled_resume_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionControlledResume) {
+      reply.code(501);
+      return { ok: false as const, error: 'controlled_resume_unavailable' as const };
+    }
+    const result = await handleSessionControlledResume(request.body);
+    if (!result.ok || !result.status) {
+      reply.code(409);
+      return { ok: false as const, error: result.error ?? 'controlled_resume_rejected' };
+    }
+    return { ok: true as const, status: result.status };
+  });
+
+  typed.post('/session-input/evidence/read', {
+    schema: {
+      body: z.object({ sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        afterSeq: z.number().int().nonnegative() }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), result: ControlledSessionEvidenceSchema }),
+        401: authSchema401,
+        501: z.object({ ok: z.literal(false), error: z.literal('evidence_reader_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionEvidenceRead) {
+      reply.code(501);
+      return { ok: false as const, error: 'evidence_reader_unavailable' as const };
+    }
+    return { ok: true as const,
+      result: await handleSessionEvidenceRead(request.body.sessionId, request.body.afterSeq) };
+  });
+
+  typed.post('/session-binding/read', {
+    schema: {
+      body: z.object({ sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/) }),
+      response: {
+        200: z.object({ ok: z.literal(true), result: SessionBindingSnapshotSchema }),
+        401: authSchema401,
+        501: z.object({ ok: z.literal(false), errorCode: z.literal('session_binding_reader_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionBindingSnapshot) {
+      reply.code(501);
+      return { ok: false as const, errorCode: 'session_binding_reader_unavailable' as const };
+    }
+    return { ok: true as const, result: await handleSessionBindingSnapshot(request.body.sessionId) };
   });
 
   typed.post('/session-runners/restart', {
@@ -2229,6 +2404,11 @@ export function startDaemonControlServer({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleSessionInputHold,
+  handleSessionControlledSend,
+  handleSessionControlledResume,
+  handleSessionEvidenceRead,
+  handleSessionBindingSnapshot,
   handleSessionRunnerRestart,
   handleSessionRunnerRestartAll,
   handleSessionRunnerStatusGet,
@@ -2295,6 +2475,18 @@ export function startDaemonControlServer({
     attemptId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleSessionInputHold?: (input: Readonly<{
+    sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
+  }>) => Readonly<{ ok: boolean; held: boolean }>;
+  handleSessionControlledSend?: (input: Readonly<{
+    sessionId: string; actionId: string; kind: 'compact' | 'continue';
+    phase: 'admit' | 'wake'; text?: string;
+  }>) => Promise<Readonly<{ ok: boolean; localId?: string; suppressed?: boolean; error?: string }>>;
+  handleSessionControlledResume?: (input: Readonly<{
+    sessionId: string; actionId: string; profileId: string; bindingGeneration: number;
+  }>) => Promise<Readonly<{ ok: boolean; status?: 'started' | 'pending'; error?: string }>>;
+  handleSessionEvidenceRead?: (sessionId: string, afterSeq: number) => Promise<ControlledSessionEvidence>;
+  handleSessionBindingSnapshot?: (sessionId: string) => Promise<SessionBindingSnapshot>;
   handleSessionRunnerRestart?: (input: RestartSessionRunnerRequestV1) => Promise<RestartSessionRunnerResultV1>;
   handleSessionRunnerRestartAll?: (
     input: RestartAllSessionRunnersRequestV1,
@@ -2352,6 +2544,11 @@ export function startDaemonControlServer({
       handleConnectedServiceTurnLifecycle,
       handleConnectedServiceUsageLimitWaitResumeCancel,
       handleSessionConnectedServiceAuthSwitch,
+      handleSessionInputHold,
+      handleSessionControlledSend,
+      handleSessionControlledResume,
+      handleSessionEvidenceRead,
+      handleSessionBindingSnapshot,
       handleSessionRunnerRestart,
       handleSessionRunnerRestartAll,
       handleSessionRunnerStatusGet,

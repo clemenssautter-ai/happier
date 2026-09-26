@@ -20,6 +20,7 @@ import {
   BackendTargetRefSchema,
   ConnectedServiceBindingsV1Schema,
   PendingFirstInputV1Schema,
+  SPAWN_SESSION_ERROR_DETAIL_KINDS,
   RestartAllSessionRunnersRequestV1Schema,
   RestartSessionRunnerRequestV1Schema,
   SessionAgentTransitionRequestV1Schema,
@@ -231,6 +232,7 @@ function normalizeMachineStopSessionResult(result: MachineStopSessionHandlerResu
 
 export type MachineRpcHandlers = {
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  isSessionInputHeld?: (sessionId: string) => boolean;
   spawnSessionForHandoff?: (
     options: SpawnSessionOptions,
     hooks: import('@/rpc/handlers/registerSessionHandlers').SpawnSessionRunnerAcceptanceHooks,
@@ -936,6 +938,15 @@ export function registerMachineRpcHandlers(params: Readonly<{
           type: 'error',
           errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
           errorMessage: 'Session ID is required for resume',
+        };
+      }
+
+      if (handlers.isSessionInputHeld?.(existingSessionId)) {
+        return {
+          type: 'error',
+          errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+          errorMessage: 'Session input is held for a controlled account transition; pending message retained',
+          errorDetail: { kind: SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD },
         };
       }
 

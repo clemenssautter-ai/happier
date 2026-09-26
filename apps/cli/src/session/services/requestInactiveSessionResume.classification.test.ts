@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
 import { RpcError } from '@happier-dev/protocol/rpcErrors';
+import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 
 const { callMachineRpc } = vi.hoisted(() => ({ callMachineRpc: vi.fn() }));
 vi.mock('@/session/transport/rpc/machineRpc', () => ({ callMachineRpc }));
@@ -52,6 +53,15 @@ describe('requestInactiveSessionResume failure classification', () => {
     });
 
     await expect(resume()).resolves.toMatchObject({ ok: false, code: 'resume_failed' });
+  });
+
+  it('classifies a durable input hold separately from a failed resume', async () => {
+    callMachineRpc.mockResolvedValue({
+      type: 'error', errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+      errorMessage: 'Pending input retained',
+      errorDetail: { kind: 'session_input_held' },
+    });
+    await expect(resume()).resolves.toMatchObject({ ok: false, code: 'input_held' });
   });
 
   it('reports a machine that threw during the resume as a failure, not as an unsupported capability', async () => {

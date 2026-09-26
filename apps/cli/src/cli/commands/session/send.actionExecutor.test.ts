@@ -116,4 +116,27 @@ describe('happier session send (action executor)', () => {
       output.restore();
     }
   });
+
+  it('reports a durably queued message while input is held', async () => {
+    execute.mockResolvedValueOnce({
+      ok: true,
+      result: { ok: true, sessionId: 'sess-1', localId: 'local-1', waited: false, held: true },
+    });
+    const { cmdSessionSend } = await import('./send');
+    const output = captureConsoleJsonOutput();
+    try {
+      await cmdSessionSend(['send', 'sess-1', 'Later', '--json'], {
+        readCredentialsFn: async () => ({
+          token: 'token_test',
+          encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
+        }),
+      });
+      expect(output.json()).toEqual(expect.objectContaining({
+        ok: true, kind: 'session_send',
+        data: { sessionId: 'sess-1', localId: 'local-1', waited: false, held: true },
+      }));
+    } finally {
+      output.restore();
+    }
+  });
 });

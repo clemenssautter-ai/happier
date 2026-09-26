@@ -35,6 +35,26 @@ function createDrainConsumer(
 }
 
 describe('SessionProviderInputConsumer drainPending', () => {
+  it('does not materialize or dispatch provider input while a durable session hold is active', async () => {
+    let held = true;
+    const materialize = vi.fn(async () => ({ type: 'no_pending' as const }));
+    const consumer = createDrainConsumer({
+      materializeNextPendingMessageSafely: materialize,
+      waitForPendingEligibilityUpdate: async () => false,
+    }, { isInputHeld: () => held });
+    const providerCall = vi.fn(async () => 'accepted' as const);
+    expect(await consumer.runProviderInputDispatch({
+      abortSignal: new AbortController().signal, dispatch: providerCall,
+    })).toEqual({ status: 'cancelled' });
+    await consumer.drainPending?.({ abortSignal: new AbortController().signal });
+    expect(materialize).not.toHaveBeenCalled();
+    expect(providerCall).not.toHaveBeenCalled();
+
+    held = false;
+    await consumer.drainPending?.({ abortSignal: new AbortController().signal });
+    expect(materialize).toHaveBeenCalledTimes(1);
+  });
+
   it('arms the Pending wake before an active-turn pass and drains once for the wake without polling', async () => {
     const metadataWakes: Array<(updated: boolean) => void> = [];
     const materializeNextPendingMessageSafely = vi

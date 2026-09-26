@@ -1,5 +1,6 @@
 import {
   SPAWN_SESSION_ERROR_CODES,
+  SPAWN_SESSION_ERROR_DETAIL_KINDS,
   type SpawnSessionErrorCode,
   type SpawnSessionNonceResolution,
 } from '@happier-dev/protocol';
@@ -25,7 +26,7 @@ export type InactiveSessionResumeResult =
   | Readonly<{ ok: true }>
   | Readonly<{
       ok: false;
-      code: 'session_archived' | 'unsupported' | 'resume_failed' | 'timeout';
+      code: 'session_archived' | 'unsupported' | 'resume_failed' | 'input_held' | 'timeout';
       message: string;
     }>;
 
@@ -199,6 +200,12 @@ export async function ensureSessionRuntimeForPendingInput(
       || typeof response !== 'object'
       || (response as { type?: unknown }).type !== 'success'
     ) {
+      const detail = response && typeof response === 'object'
+        ? (response as { errorDetail?: { kind?: unknown } }).errorDetail : null;
+      if (detail?.kind === SPAWN_SESSION_ERROR_DETAIL_KINDS.SESSION_INPUT_HELD) {
+        return { ok: false, code: 'input_held',
+                 message: 'Message queued during controlled account transition' };
+      }
       // The machine received the request and answered that it did not start the
       // Session. Whatever it names — a filesystem error, a busy resource, a
       // spawn that died — is this attempt failing, never a capability this

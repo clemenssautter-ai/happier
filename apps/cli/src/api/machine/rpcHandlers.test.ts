@@ -610,6 +610,32 @@ describe('registerMachineRpcHandlers', () => {
     expect(spawnSession).toHaveBeenCalledWith(expect.objectContaining({ modelId: undefined, modelUpdatedAt: 456 }));
   });
 
+  it('keeps a held session stopped when a persisted user message asks for resume', async () => {
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const spawnSession = vi.fn(async () => ({ type: 'success', sessionId: 'sess-held' } as const));
+    registerMachineRpcHandlers({
+      rpcHandlerManager: {
+        registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+          registered.set(method, handler);
+        },
+      } as any,
+      handlers: {
+        spawnSession,
+        stopSession: async () => true,
+        requestShutdown: () => {},
+        isSessionInputHeld: (sessionId: string) => sessionId === 'sess-held',
+      },
+    });
+    const response = await registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION)!({
+      type: 'resume-session', directory: '/tmp', sessionId: 'sess-held',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+    });
+    expect(response).toMatchObject({
+      type: 'error', errorCode: SPAWN_SESSION_ERROR_CODES.SPAWN_VALIDATION_FAILED,
+    });
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
   it('passes through environmentVariables when resuming a session', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {

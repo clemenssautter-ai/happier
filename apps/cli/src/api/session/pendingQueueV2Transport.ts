@@ -732,6 +732,18 @@ export async function listPendingQueueV2LocalIdsFromServer(params: {
     return pending.map((entry) => entry.localId);
 }
 
+/** User turns still in server custody, for a controlled session input fence. */
+export async function listPendingQueueV2UserLocalIdsFromServer(params: {
+    token: string;
+    sessionId: string;
+}): Promise<string[]> {
+    const pending = await fetchPendingQueueV2Projection(params);
+    return pending
+        .filter((entry) => entry.messageRole === 'user'
+            && (entry.deliveryStatus.status === 'queued' || entry.deliveryStatus.status === 'delivering'))
+        .map((entry) => entry.localId);
+}
+
 export type PendingQueueV2ActivationEligibility = 'eligible' | 'missing' | 'ineligible';
 
 export async function readPendingQueueV2ActivationEligibilityFromServer(params: {

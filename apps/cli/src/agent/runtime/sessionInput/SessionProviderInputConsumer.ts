@@ -61,6 +61,7 @@ export interface SessionProviderInputConsumerOptions<Mode, Message> {
   resolvePendingQueueDeliveryTiming?: (() => PendingQueueDeliveryTiming | undefined) | undefined;
   metadataWaitRetryBackoffMs?: number | undefined;
   pendingDrainMaxPopPerWake?: number | undefined;
+  isInputHeld?: (() => boolean) | undefined;
 }
 
 type WakeWinner =
@@ -221,6 +222,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
   let activeProviderInputDispatches = 0;
   let activePendingMaterializationRequests = 0;
   let providerInputBatchReserved = false;
+  const inputAvailable = (): boolean => providerInputAdmissionOpen && !opts.isInputHeld?.();
   const activeProviderInputAdmissionWorkDrainWaiters = new Set<() => void>();
 
   const notifyProviderInputAdmissionWorkDrained = (): void => {
@@ -241,7 +243,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
     abortSignal: AbortSignal;
     dispatch: () => Promise<Value>;
   }>): Promise<Readonly<{ status: 'dispatched'; value: Value }> | Readonly<{ status: 'cancelled' }>> => {
-    if (!providerInputAdmissionOpen || dispatchOpts.abortSignal.aborted) {
+    if (!inputAvailable() || dispatchOpts.abortSignal.aborted) {
       return { status: 'cancelled' };
     }
     // This increment and closeProviderInputAdmissionAndWaitForDispatches's flag write are
@@ -258,11 +260,11 @@ export function createSessionProviderInputConsumer<Mode, Message>(
 
   const admissionTrackedSession: SessionProviderInputConsumerSession = {
     materializeNextPendingMessageSafely: async (materializeOpts) => {
-      if (!providerInputAdmissionOpen) return { type: 'no_pending' };
+      if (!inputAvailable()) return { type: 'no_pending' };
       activePendingMaterializationRequests += 1;
       try {
         const result = await opts.session.materializeNextPendingMessageSafely(materializeOpts);
-        if (!providerInputAdmissionOpen && result.type === 'materialized') {
+        if (!inputAvailable() && result.type === 'materialized') {
           const localId = readPendingLocalId(result.localId);
           if (localId && opts.session.blockPendingMessageDelivery) {
             await opts.session.blockPendingMessageDelivery({
@@ -350,6 +352,9 @@ export function createSessionProviderInputConsumer<Mode, Message>(
       if (!canStart) {
         return { materialized: 0, stoppedReason: 'aborted' };
       }
+      if (!inputAvailable()) {
+        return { materialized: 0, stoppedReason: 'drain_disallowed' };
+      }
       if (opts.messageQueue.size() > 0) {
         return { materialized: 0, stoppedReason: 'drain_disallowed' };
       }
@@ -372,7 +377,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
         {
           ...drainOpts,
           shouldContinue: () => (
-            providerInputAdmissionOpen
+            inputAvailable()
             && (callerShouldContinue?.() ?? true)
           ),
         },
@@ -398,7 +403,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
 
       try {
         const canStart = await waitForSerializedWaitTurn(previousTurn, waitOpts.abortSignal);
-        if (!canStart || waitOpts.abortSignal.aborted || !providerInputAdmissionOpen) {
+        if (!canStart || waitOpts.abortSignal.aborted || !inputAvailable()) {
           return null;
         }
         // Requesting the next input is the provider loop's acknowledgement that the previously
@@ -409,7 +414,7 @@ export function createSessionProviderInputConsumer<Mode, Message>(
           ...opts,
           session: admissionTrackedSession,
           abortSignal: waitOpts.abortSignal,
-          isProviderInputAdmissionOpen: () => providerInputAdmissionOpen,
+          isProviderInputAdmissionOpen: inputAvailable,
         });
         if (
           batch?.pendingProviderAction !== undefined

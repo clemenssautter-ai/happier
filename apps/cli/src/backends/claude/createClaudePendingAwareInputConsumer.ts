@@ -11,6 +11,8 @@ import {
 import type { EnhancedMode } from './loop';
 import type { Session } from './session';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
+import { configuration } from '@/configuration';
+import { createSessionInputHoldStore } from '@/daemon/sessionInputHold/sessionInputHoldStore';
 
 /**
  * Canonical Claude session input consumer: local agent queue + daemon-owned
@@ -32,6 +34,7 @@ export function createClaudePendingAwareInputConsumer(
         refreshActiveTurnSteerability?: (() => Promise<PendingForegroundSteerability>) | undefined;
     }>,
 ): SessionProviderInputConsumer<EnhancedMode, string> {
+    const holdStore = createSessionInputHoldStore(configuration.activeServerDir);
     const consumer = createSessionProviderInputConsumer<EnhancedMode, string>({
         messageQueue: session.queue,
         session: {
@@ -86,6 +89,11 @@ export function createClaudePendingAwareInputConsumer(
                 : {}),
         },
         pendingDrainMaxPopPerWake: resolveSessionPendingQueueMaxPopPerWake(session.accountSettings ?? null),
+        isInputHeld: () => {
+            const sessionId = session.client.sessionId;
+            return typeof sessionId === 'string' && sessionId.length > 0
+                && holdStore.isHeld(sessionId);
+        },
         resolvePendingQueueDeliveryTiming: () => resolveSessionPendingQueueDeliveryTiming(
             getActiveAccountSettingsSnapshot()?.settings ?? session.accountSettings ?? null,
         ),
