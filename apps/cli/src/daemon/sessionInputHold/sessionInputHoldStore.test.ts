@@ -36,4 +36,21 @@ describe('session input hold', () => {
     expect(store.isHeld('session-a')).toBe(true);
     expect(store.release('session-a', 'action-a')).toBe(false);
   });
+
+  it('keeps ingress closed while another process changes the hold', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const first = createSessionInputHoldStore(dir);
+    expect(first.hold('session-a', 'action-a')).toBe(true);
+    expect(first.release('session-a', 'action-a')).toBe(true);
+
+    // A second process owns the short state-transition critical section.
+    // Neither an old release nor a new hold may race across its replacement.
+    mkdirSync(join(dir, 'session-input-holds', 'session-a.lock'));
+    const competing = createSessionInputHoldStore(dir);
+    expect(competing.isHeld('session-a')).toBe(true);
+    expect(competing.hold('session-a', 'action-b')).toBe(false);
+    expect(first.release('session-a', 'action-a')).toBe(false);
+    expect(competing.status('session-a')).toEqual({ actionId: 'action-a', held: false });
+  });
 });
