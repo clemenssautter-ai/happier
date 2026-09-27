@@ -240,4 +240,73 @@ describe('session input hold', () => {
     expect(store.hold('session-a', 'action-a')).toBe(false);
     expect(store.isHeld('session-a')).toBe(true);
   });
+
+  it('cancels only before a durable compact admit and tombstones the action', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(true);
+    expect(store.cancelIfNoControlledTurn('session-a', 'action-a')).toBe(true);
+    expect(store.isHeld('session-a')).toBe(false);
+    expect(store.canControlledWake('session-a', 'action-a', 'compact')).toBe(false);
+    expect(createSessionInputHoldStore(dir).reserveControlledAdmit('session-a', 'action-a')).toBe(false);
+    expect(store.hold('session-a', 'action-a')).toBe(false);
+    expect(store.cancelIfNoControlledTurn('session-a', 'action-a')).toBe(true);
+    expect(store.hold('session-a', 'action-b')).toBe(true);
+    expect(store.reserveControlledAdmit('session-a', 'action-b')).toBe(true);
+    expect(store.cancelIfNoControlledTurn('session-a', 'action-b')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+    expect(store.release('session-a', 'action-b')).toBe(true);
+    expect(store.canControlledWake('session-a', 'action-b', 'compact')).toBe(true);
+  });
+
+  it('keeps legacy and uncertain hold records closed to compact cancellation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const holdsDir = join(dir, 'session-input-holds');
+    mkdirSync(holdsDir);
+    const path = join(holdsDir, 'session-a.json');
+    writeFileSync(path, JSON.stringify({ v: 1, sessionId: 'session-a', actionId: 'action-a', state: 'held' }));
+    const store = createSessionInputHoldStore(dir);
+    expect(store.cancelIfNoControlledTurn('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+    writeFileSync(path, '{unknown');
+    expect(store.cancelIfNoControlledTurn('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+  });
+
+  it('serializes compact admit and cancel across two worker processes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(true);
+    const source = new URL('./sessionInputHoldStore.ts', import.meta.url).href;
+    const script = `
+      import { createSessionInputHoldStore } from ${JSON.stringify(source)};
+      const store = createSessionInputHoldStore(process.env.HOLD_TEST_DIR);
+      const won = process.env.HOLD_TEST_OPERATION === 'cancel'
+        ? store.cancelIfNoControlledTurn('session-a', 'action-a')
+        : store.reserveControlledAdmit('session-a', 'action-a');
+      process.stdout.write(JSON.stringify({ won }));
+    `;
+    const children = ['cancel', 'admit'].map((operation) => spawn(process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', script], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOLD_TEST_DIR: dir, HOLD_TEST_OPERATION: operation },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }));
+    const results = await Promise.all(children.map(async (child) => {
+      let output = '';
+      let errors = '';
+      child.stdout!.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr!.on('data', (chunk: Buffer) => { errors += chunk.toString(); });
+      const [code] = await once(child, 'close');
+      expect(code, errors).toBe(0);
+      return JSON.parse(output) as { won: boolean };
+    }));
+    expect(results.filter((result) => result.won)).toHaveLength(1);
+    expect(store.isHeld('session-a')).toBe(results[1]!.won);
+    if (results[0]!.won) expect(store.reserveControlledAdmit('session-a', 'action-a')).toBe(false);
+    if (results[1]!.won) expect(store.cancelIfNoControlledTurn('session-a', 'action-a')).toBe(false);
+  });
 });

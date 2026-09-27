@@ -401,6 +401,7 @@ export function createDaemonControlApp({
   handleSessionConnectedServiceAuthSwitch,
   handleConnectedServiceProfilePreflight,
   handleSessionInputHold,
+  handleSessionControlledCancel,
   handleSessionControlledSend,
   handleSessionControlledResume,
   handleSessionEvidenceRead,
@@ -487,6 +488,9 @@ export function createDaemonControlApp({
   handleSessionInputHold?: (input: Readonly<{
     sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
   }>) => Readonly<{ ok: boolean; held: boolean }>;
+  handleSessionControlledCancel?: (input: Readonly<{
+    sessionId: string; actionId: string; kind: 'compact';
+  }>) => Readonly<{ ok: boolean; cancelled: boolean; held: boolean }>;
   handleSessionControlledSend?: (input: Readonly<{
     sessionId: string; actionId: string; kind: 'compact' | 'continue';
     phase: 'admit' | 'wake'; text?: string;
@@ -787,6 +791,34 @@ export function createDaemonControlApp({
       return { ok: false as const, held: result.held };
     }
     return { ok: true as const, held: result.held };
+  });
+
+  typed.post('/session-input/controlled-cancel', {
+    schema: {
+      body: z.object({
+        sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        actionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
+        kind: z.literal('compact'),
+      }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), cancelled: z.literal(true), held: z.literal(false) }),
+        401: authSchema401,
+        409: z.object({ ok: z.literal(false), cancelled: z.literal(false), held: z.boolean() }),
+        501: z.object({ ok: z.literal(false), error: z.literal('controlled_cancel_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleSessionControlledCancel) {
+      reply.code(501);
+      return { ok: false as const, error: 'controlled_cancel_unavailable' as const };
+    }
+    const result = handleSessionControlledCancel(request.body);
+    if (!result.ok || !result.cancelled || result.held) {
+      reply.code(409);
+      return { ok: false as const, cancelled: false as const, held: result.held };
+    }
+    return { ok: true as const, cancelled: true as const, held: false as const };
   });
 
   typed.post('/session-input/controlled-send', {
@@ -2444,6 +2476,7 @@ export function startDaemonControlServer({
   handleSessionConnectedServiceAuthSwitch,
   handleConnectedServiceProfilePreflight,
   handleSessionInputHold,
+  handleSessionControlledCancel,
   handleSessionControlledSend,
   handleSessionControlledResume,
   handleSessionEvidenceRead,
@@ -2520,6 +2553,9 @@ export function startDaemonControlServer({
   handleSessionInputHold?: (input: Readonly<{
     sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
   }>) => Readonly<{ ok: boolean; held: boolean }>;
+  handleSessionControlledCancel?: (input: Readonly<{
+    sessionId: string; actionId: string; kind: 'compact';
+  }>) => Readonly<{ ok: boolean; cancelled: boolean; held: boolean }>;
   handleSessionControlledSend?: (input: Readonly<{
     sessionId: string; actionId: string; kind: 'compact' | 'continue';
     phase: 'admit' | 'wake'; text?: string;
@@ -2588,6 +2624,7 @@ export function startDaemonControlServer({
       handleSessionConnectedServiceAuthSwitch,
       handleConnectedServiceProfilePreflight,
       handleSessionInputHold,
+      handleSessionControlledCancel,
       handleSessionControlledSend,
       handleSessionControlledResume,
       handleSessionEvidenceRead,

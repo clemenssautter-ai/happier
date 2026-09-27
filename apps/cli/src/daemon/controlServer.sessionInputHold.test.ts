@@ -172,6 +172,46 @@ describe('daemon session input hold control', () => {
     }
   });
 
+  it('authenticates compact cancellation and rejects a later controlled admit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-control-'));
+    const store = createSessionInputHoldStore(dir);
+    const app = createDaemonControlApp({
+      getChildren: () => [], machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({ type: 'error' as const,
+                                  errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+                                  errorMessage: 'unused' }),
+      requestShutdown: () => {}, onHappySessionWebhook: () => {}, controlToken: 'token',
+      handleSessionControlledCancel: ({ sessionId, actionId }) => {
+        const cancelled = store.cancelIfNoControlledTurn(sessionId, actionId);
+        const held = store.isHeld(sessionId);
+        return { ok: cancelled && !held, cancelled, held };
+      },
+      handleSessionControlledSend: async ({ sessionId, actionId }) =>
+        store.reserveControlledAdmit(sessionId, actionId)
+          ? { ok: true, localId: `usage-${actionId}-compact` }
+          : { ok: false, error: 'action_fence_mismatch' },
+    });
+    try {
+      expect(store.hold('session-a', 'action-a')).toBe(true);
+      const payload = { sessionId: 'session-a', actionId: 'action-a', kind: 'compact' };
+      const denied = await app.inject({ method: 'POST', url: '/session-input/controlled-cancel', payload });
+      expect(denied.statusCode).toBe(401);
+      const cancelled = await app.inject({ method: 'POST', url: '/session-input/controlled-cancel',
+        headers: { 'x-happier-daemon-token': 'token' }, payload });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json()).toEqual({ ok: true, cancelled: true, held: false });
+      const admit = await app.inject({ method: 'POST', url: '/session-input/controlled-send',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { ...payload, phase: 'admit' } });
+      expect(admit.statusCode).toBe(409);
+      expect(store.canControlledWake('session-a', 'action-a', 'compact')).toBe(false);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a controlled compact only through the authenticated action route', async () => {
     const handleSessionControlledSend = async ({ actionId, kind, phase }: {
       actionId: string; kind: 'compact' | 'continue'; phase: 'admit' | 'wake';

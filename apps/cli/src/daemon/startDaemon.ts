@@ -6519,6 +6519,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           : sessionInputHoldStore.release(sessionId, actionId);
         return { ok, held: sessionInputHoldStore.isHeld(sessionId) };
       },
+      handleSessionControlledCancel: ({ sessionId, actionId }) => {
+        const cancelled = sessionInputHoldStore.cancelIfNoControlledTurn(sessionId, actionId);
+        const held = sessionInputHoldStore.isHeld(sessionId);
+        return { ok: cancelled && !held, cancelled, held };
+      },
       handleSessionControlledSend: async ({ sessionId, actionId, kind, phase, text }) => {
         const fence = sessionInputHoldStore.status(sessionId);
         if (!fence || fence.actionId !== actionId || fence.held !== (phase === 'admit')) {
@@ -6526,6 +6531,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         }
         if (kind === 'continue' && !text?.trim()) {
           return { ok: false, error: 'controlled_send_phase_invalid' };
+        }
+        if (phase === 'admit'
+            ? !sessionInputHoldStore.reserveControlledAdmit(sessionId, actionId)
+            : !sessionInputHoldStore.canControlledWake(sessionId, actionId, kind)) {
+          return { ok: false, error: 'action_fence_mismatch' };
         }
         const localId = `usage-${actionId}-${kind}`;
         const sent = await sendSessionMessage({

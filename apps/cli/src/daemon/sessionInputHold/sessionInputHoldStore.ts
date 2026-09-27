@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeSync, fsyncSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 function fileFor(activeServerDir: string, sessionId: string): string {
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) {
@@ -9,13 +9,33 @@ function fileFor(activeServerDir: string, sessionId: string): string {
   return join(activeServerDir, 'session-input-holds', `${sessionId}.json`);
 }
 
-function stateFrom(path: string): { actionId: string; held: boolean } | null {
+type HoldState = Readonly<{
+  actionId: string;
+  state: 'held' | 'released' | 'cancelled';
+  version: 1 | 2;
+  controlledAdmitted: boolean;
+  held: boolean;
+}>;
+
+function stateFrom(path: string): HoldState | null {
   try {
     const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const actionId = (value as { actionId?: unknown }).actionId;
+    const candidate = value as { v?: unknown; sessionId?: unknown; actionId?: unknown;
+      state?: unknown; controlledAdmitted?: unknown };
+    const actionId = candidate.actionId;
     if (typeof actionId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(actionId)) return null;
-    return { actionId, held: (value as { state?: unknown }).state !== 'released' };
+    if (candidate.v === 2) {
+      if (candidate.sessionId !== basename(path, '.json')
+          || !['held', 'released', 'cancelled'].includes(candidate.state as string)
+          || typeof candidate.controlledAdmitted !== 'boolean') return null;
+      const state = candidate.state as HoldState['state'];
+      return { actionId, state, version: 2, controlledAdmitted: candidate.controlledAdmitted,
+        held: state === 'held' };
+    }
+    if (candidate.v !== 1) return null;
+    const state = candidate.state === 'released' ? 'released' : 'held';
+    return { actionId, state, version: 1, controlledAdmitted: false, held: state === 'held' };
   } catch {
     return null;
   }
@@ -135,11 +155,12 @@ export function createSessionInputHoldStore(activeServerDir: string) {
       if (existsSync(staged)) unlinkSync(staged);
     }
   }
-  function writeState(path: string, sessionId: string, actionId: string, state: 'held' | 'released'): string {
+  function writeState(path: string, sessionId: string, actionId: string,
+    state: HoldState['state'], controlledAdmitted = false): string {
     const temp = `${path}.${randomUUID()}.tmp`;
     const fd = openSync(temp, 'wx', 0o600);
     try {
-      writeSync(fd, JSON.stringify({ v: 1, sessionId, actionId, state }));
+      writeSync(fd, JSON.stringify({ v: 2, sessionId, actionId, state, controlledAdmitted }));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -151,8 +172,10 @@ export function createSessionInputHoldStore(activeServerDir: string) {
     try { fsyncSync(fd); } finally { closeSync(fd); }
   }
   return {
-    status: (sessionId: string): { actionId: string; held: boolean } | null =>
-      stateFrom(fileFor(activeServerDir, sessionId)),
+    status: (sessionId: string): { actionId: string; held: boolean } | null => {
+      const state = stateFrom(fileFor(activeServerDir, sessionId));
+      return state ? { actionId: state.actionId, held: state.held } : null;
+    },
     hold: (sessionId: string, actionId: string): boolean => {
       if (!/^[A-Za-z0-9_-]{8,128}$/.test(actionId)) throw new Error('Invalid action id');
       const path = fileFor(activeServerDir, sessionId);
@@ -181,7 +204,7 @@ export function createSessionInputHoldStore(activeServerDir: string) {
         const current = stateFrom(path);
         if (current?.actionId !== actionId) return false;
         if (!current.held) return true;
-        const temp = writeState(path, sessionId, actionId, 'released');
+        const temp = writeState(path, sessionId, actionId, 'released', current.controlledAdmitted);
         try {
           renameSync(temp, path);
           syncParent(path);
@@ -190,6 +213,46 @@ export function createSessionInputHoldStore(activeServerDir: string) {
           if (existsSync(temp)) unlinkSync(temp);
         }
       });
+    },
+    reserveControlledAdmit: (sessionId: string, actionId: string): boolean => {
+      const path = fileFor(activeServerDir, sessionId);
+      return withMutationLock(sessionId, () => {
+        const current = stateFrom(path);
+        if (!current || current.version !== 2 || current.actionId !== actionId || !current.held) return false;
+        if (current.controlledAdmitted) return true;
+        const temp = writeState(path, sessionId, actionId, 'held', true);
+        try {
+          renameSync(temp, path);
+          syncParent(path);
+          return true;
+        } finally {
+          if (existsSync(temp)) unlinkSync(temp);
+        }
+      });
+    },
+    cancelIfNoControlledTurn: (sessionId: string, actionId: string): boolean => {
+      const path = fileFor(activeServerDir, sessionId);
+      return withMutationLock(sessionId, () => {
+        const current = stateFrom(path);
+        if (!current || current.version !== 2 || current.actionId !== actionId) return false;
+        if (current.state === 'cancelled') return true;
+        if (!current.held || current.controlledAdmitted) return false;
+        const temp = writeState(path, sessionId, actionId, 'cancelled');
+        try {
+          renameSync(temp, path);
+          syncParent(path);
+          return true;
+        } finally {
+          if (existsSync(temp)) unlinkSync(temp);
+        }
+      });
+    },
+    canControlledWake: (sessionId: string, actionId: string, kind: 'compact' | 'continue'): boolean => {
+      const path = fileFor(activeServerDir, sessionId);
+      if (existsSync(path.slice(0, -'.json'.length) + '.lock')) return false;
+      const current = stateFrom(path);
+      return current?.actionId === actionId && current.state === 'released'
+        && (kind !== 'compact' || current.controlledAdmitted);
     },
     isHeld: (sessionId: string): boolean => {
       const path = fileFor(activeServerDir, sessionId);
