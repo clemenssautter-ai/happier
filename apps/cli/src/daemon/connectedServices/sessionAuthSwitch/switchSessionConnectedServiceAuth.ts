@@ -244,6 +244,7 @@ export type SessionConnectedServiceAuthSwitchRequest = Readonly<{
   rematerializeServiceId?: ConnectedServiceId;
   expectedGroupGenerationByServiceId?: Readonly<Record<string, number>>;
   accountSettingsVersionHint?: number;
+  controlledActionId?: string;
 }>;
 
 type ConnectedServiceProfilesApi = Readonly<{
@@ -1033,6 +1034,7 @@ function emitManualSwitchEvents(input: Readonly<{
   fromProfileIdOverrideByServiceId?: ReadonlyMap<ConnectedServiceId, string | null>;
   reason: string;
   mode: ConnectedServiceAccountSwitchMode;
+  controlledActionId?: string;
 }>): void {
   for (const [serviceId, next] of input.nextByServiceId.entries()) {
     const previous = input.previousByServiceId.get(serviceId) ?? null;
@@ -1047,6 +1049,7 @@ function emitManualSwitchEvents(input: Readonly<{
       toProfileId: next.profileId,
       reason: input.reason,
       mode: input.mode,
+      ...(input.controlledActionId ? { controlledActionId: input.controlledActionId } : {}),
     });
   }
 }
@@ -2015,6 +2018,8 @@ export async function switchSessionConnectedServiceAuth(
           fromProfileIdOverrideByServiceId: input.emitFromProfileIdByServiceId,
           reason: input.sessionEventReason ?? 'manual',
           mode: 'spawn_next_turn',
+          ...(input.request.controlledActionId
+            ? { controlledActionId: input.request.controlledActionId } : {}),
         });
 
         return {
@@ -2453,6 +2458,8 @@ export async function switchSessionConnectedServiceAuth(
           : action === 'metadata_updated'
             ? 'spawn_next_turn'
             : 'restart_resume',
+        ...(input.request.controlledActionId
+          ? { controlledActionId: input.request.controlledActionId } : {}),
       });
 
       return {

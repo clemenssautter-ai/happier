@@ -505,6 +505,7 @@ import { sendSessionMessage } from '@/session/services/sendSessionMessage';
 import { buildInactiveSessionResumeSpawnOptions } from './sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 import { listPendingQueueV2UserLocalIdsFromServer, readPendingQueueV2ActivationEligibilityFromServer } from '@/api/session/pendingQueueV2Transport';
 import { readControlledSessionEvidence } from './sessionInputHold/controlledSessionEvidence';
+import { resolveBindingGeneration } from './sessionInputHold/resolveBindingGeneration';
 
 function resolvePositiveIntEnv(raw: string | undefined, fallback: number, bounds: { min: number; max: number }): number {
   const value = (raw ?? '').trim();
@@ -6617,8 +6618,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         const parsed = ConnectedServiceBindingsV1Schema.safeParse(record.connectedServices);
         const selected = parsed.success
           ? parsed.data.bindingsByServiceId['claude-subscription'] : undefined;
-        const updatedAt = typeof record.connectedServicesUpdatedAt === 'number'
-          ? record.connectedServicesUpdatedAt : null;
+        // Initial profile bindings are created with the session and have no
+        // connectedServicesUpdatedAt yet. The session creation timestamp is
+        // their stable generation; a later switch supplies its own timestamp.
+        const updatedAt = resolveBindingGeneration(
+          record.connectedServicesUpdatedAt, raw.createdAt);
         const binding = selected?.source === 'connected' && selected.selection === 'profile'
           ? { kind: 'profile' as const, profileId: selected.profileId, updatedAt }
           : selected?.source === 'connected' && selected.selection === 'group'
@@ -6713,6 +6717,16 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       },
       handleConnectedServiceUsageLimitWaitResumeCancel: cancelConnectedServiceUsageLimitWaitResumeForSession,
       handleSessionConnectedServiceAuthSwitch: async (input) => {
+        const inputHold = sessionInputHoldStore.status(input.sessionId);
+        if (inputHold?.held && inputHold.actionId !== input.controlledActionId) {
+          return { ok: false as const, errorCode: 'restart_disallowed_by_execution_policy' as const,
+            diagnostics: { failurePhase: 'continuity' as const, retryable: true } };
+        }
+        if (input.controlledActionId && (!inputHold?.held
+            || inputHold.actionId !== input.controlledActionId)) {
+          return { ok: false as const, errorCode: 'restart_disallowed_by_execution_policy' as const,
+            diagnostics: { failurePhase: 'continuity' as const, retryable: false } };
+        }
         let diagnostics: SessionConnectedServiceAuthSwitchDiagnostics | undefined;
         const switchStartedAtMs = Date.now();
         const serviceIds = Object.keys(input.bindings.bindingsByServiceId);

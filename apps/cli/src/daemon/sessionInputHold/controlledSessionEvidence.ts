@@ -13,6 +13,7 @@ export type ControlledEvidenceRow = Readonly<{
   lifecycleId?: string;
   providerEventId?: string;
   toProfileId?: string;
+  actionId?: string;
 }>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -69,6 +70,8 @@ export function projectControlledEvidenceRows(rows: readonly TranscriptRow[],
     } else if (content?.type === 'event' && data?.type === 'connected-service-account-switch') {
       result.push({ seq: row.seq, kind: 'switch_event',
         ...(typeof data.toProfileId === 'string' ? { toProfileId: data.toProfileId } : {}),
+        ...(typeof data.controlledActionId === 'string'
+          ? { actionId: data.controlledActionId } : {}),
       });
     }
   }

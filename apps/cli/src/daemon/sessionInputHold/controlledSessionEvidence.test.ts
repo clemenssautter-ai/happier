@@ -36,4 +36,18 @@ describe('controlled session evidence', () => {
       row(11, null, { role: 'user', content: { type: 'text', text: 'two' } }),
     ], () => null)).toThrow('without localId');
   });
+
+  it('keeps the action ID on a controlled switch event', () => {
+    const evidence = projectControlledEvidenceRows([
+      row(17, null, { role: 'agent', content: { type: 'event', data: {
+        type: 'connected-service-account-switch', toProfileId: 'clemens2',
+        controlledActionId: 'action_1234' } } }),
+      row(18, null, { role: 'agent', content: { type: 'event', data: {
+        type: 'connected-service-account-switch', toProfileId: 'clemens2' } } }),
+    ], () => null);
+    expect(evidence).toEqual([
+      { seq: 17, kind: 'switch_event', toProfileId: 'clemens2', actionId: 'action_1234' },
+      { seq: 18, kind: 'switch_event', toProfileId: 'clemens2' },
+    ]);
+  });
 });

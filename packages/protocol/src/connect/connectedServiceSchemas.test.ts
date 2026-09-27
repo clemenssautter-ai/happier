@@ -912,6 +912,7 @@ describe('connectedServiceSchemas', () => {
             expectedGroupGenerationByServiceId: { anthropic: 4 },
             rematerializeServiceId: 'anthropic',
             accountSettingsVersionHint: 42,
+            controlledActionId: 'action_1234',
         })).toEqual({
             sessionId: 'sess_1',
             agentId: 'claude',
@@ -928,6 +929,7 @@ describe('connectedServiceSchemas', () => {
             expectedGroupGenerationByServiceId: { anthropic: 4 },
             rematerializeServiceId: 'anthropic',
             accountSettingsVersionHint: 42,
+            controlledActionId: 'action_1234',
         });
     });
 

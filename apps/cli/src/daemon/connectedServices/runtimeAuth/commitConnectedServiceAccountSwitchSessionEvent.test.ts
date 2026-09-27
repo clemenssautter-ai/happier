@@ -58,6 +58,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
         fromProfileId: 'old-profile',
         toProfileId: 'new-profile',
         reason: 'manual',
+        controlledActionId: 'action_1234',
       },
     });
 
@@ -70,7 +71,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
     expect(postSpy).toHaveBeenCalledWith(
       expect.stringMatching(/\/v2\/sessions\/sess-1\/messages$/),
       expect.objectContaining({
-        localId: expect.stringMatching(/^connected-service-account-switch:anthropic:direct:/),
+        localId: expect.stringMatching(/^connected-service-account-switch:anthropic:action_1234/),
         content: expect.objectContaining({
           t: 'plain',
           v: expect.objectContaining({
@@ -80,6 +81,7 @@ describe('commitConnectedServiceAccountSwitchSessionEvent', () => {
                 fromProfileId: 'old-profile',
                 toProfileId: 'new-profile',
                 reason: 'manual',
+                controlledActionId: 'action_1234',
               }),
             }),
           }),

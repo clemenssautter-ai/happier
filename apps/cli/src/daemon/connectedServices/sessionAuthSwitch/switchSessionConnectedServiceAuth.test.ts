@@ -530,6 +530,7 @@ describe('switchSessionConnectedServiceAuth', () => {
         sessionId: 'sess_inactive',
         agentId: 'claude',
         bindings: bindings('new-profile'),
+        controlledActionId: 'action_1234',
       },
     } as any);
 
@@ -560,6 +561,7 @@ describe('switchSessionConnectedServiceAuth', () => {
       fromProfileId: 'old-profile',
       toProfileId: 'new-profile',
       reason: 'manual',
+      controlledActionId: 'action_1234',
     }));
   });
 

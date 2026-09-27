@@ -90,6 +90,7 @@ export const SessionConnectedServiceAuthSwitchRpcParamsSchema = z
         rematerializeServiceId: ConnectedServiceIdSchema.optional(),
         expectedGroupGenerationByServiceId: z.record(z.string(), z.number().int().nonnegative()).optional(),
         accountSettingsVersionHint: z.number().int().nonnegative().optional(),
+        controlledActionId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/).optional(),
     })
     .strict();
 

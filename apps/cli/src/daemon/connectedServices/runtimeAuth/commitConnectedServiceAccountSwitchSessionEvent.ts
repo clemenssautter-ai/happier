@@ -44,6 +44,7 @@ type ConnectedServiceRuntimeSwitchSessionEvent = Readonly<{
   reason: string;
   mode: ConnectedServiceAccountSwitchMode;
   generation?: number;
+  controlledActionId?: string;
 }>;
 
 type ConnectedServiceRuntimeSwitchDeferralSessionEvent = Readonly<{
@@ -151,6 +152,9 @@ function parseRuntimeSwitchEvent(value: unknown): ConnectedServiceRuntimeSwitchS
   const rawFromProfileId = typeof record.fromProfileId === 'string' ? record.fromProfileId.trim() : '';
   const rawToProfileId = typeof record.toProfileId === 'string' ? record.toProfileId.trim() : '';
   const reason = typeof record.reason === 'string' ? record.reason.trim() : '';
+  const controlledActionId = typeof record.controlledActionId === 'string'
+    && /^[A-Za-z0-9_-]{8,128}$/.test(record.controlledActionId)
+    ? record.controlledActionId : null;
   if (!parsedServiceId.success || (!rawFromProfileId && !rawToProfileId) || !reason) return null;
   const rawGeneration = record.type === 'connected_service_auth_group_switch'
     ? record.toGeneration
@@ -168,6 +172,7 @@ function parseRuntimeSwitchEvent(value: unknown): ConnectedServiceRuntimeSwitchS
     reason,
     mode: parseSwitchMode(record.mode),
     ...(generation === undefined ? {} : { generation }),
+    ...(controlledActionId ? { controlledActionId } : {}),
   };
 }
 
@@ -451,6 +456,11 @@ function buildConnectedServiceAccountSwitchEventId(
   parsed: ConnectedServiceRuntimeSwitchSessionEvent,
   reason: TranscriptSwitchReason,
 ): string {
+  if (parsed.controlledActionId) {
+    return buildAgentEventLocalId('connected-service-account-switch', [
+      parsed.serviceId, parsed.controlledActionId,
+    ]);
+  }
   const groupPart = parsed.groupId ?? 'direct';
   if (parsed.generation !== undefined) {
     return buildAgentEventLocalId('connected-service-account-switch', [
@@ -717,6 +727,7 @@ export async function commitConnectedServiceAccountSwitchSessionEvent(params: Re
       ...(toProfileLabel ? { toProfileLabel } : {}),
       reason,
       mode: parsed.mode,
+      ...(parsed.controlledActionId ? { controlledActionId: parsed.controlledActionId } : {}),
     },
   });
 }
