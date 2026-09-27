@@ -160,6 +160,7 @@ const ControlledSessionEvidenceSchema = z.object({
       'compact_started', 'compact_completed', 'switch_event']),
     localId: z.string().optional(), lifecycleId: z.string().optional(),
     providerEventId: z.string().optional(), toProfileId: z.string().optional(),
+    actionId: z.string().optional(),
   })).max(1000),
 });
 type ControlledSessionEvidence = z.infer<typeof ControlledSessionEvidenceSchema>;

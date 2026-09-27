@@ -93,6 +93,37 @@ describe('daemon session input hold control', () => {
     }
   });
 
+  it('preserves controlled switch action identity in the authenticated evidence response', async () => {
+    const app = createDaemonControlApp({
+      getChildren: () => [], machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({ type: 'error' as const,
+                                  errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+                                  errorMessage: 'unused' }),
+      requestShutdown: () => {}, onHappySessionWebhook: () => {}, controlToken: 'token',
+      handleSessionEvidenceRead: async (sessionId, afterSeq) => ({
+        sessionId, afterSeq, serverMessageSeq: 17, pendingLocalIds: [],
+        rows: [{ seq: 17, kind: 'switch_event', toProfileId: 'clemens2',
+                 actionId: 'action_1234' }],
+      }),
+    });
+    try {
+      const payload = { sessionId: 'session_1234', afterSeq: 16 };
+      const denied = await app.inject({ method: 'POST', url: '/session-input/evidence/read', payload });
+      expect(denied.statusCode).toBe(401);
+      const accepted = await app.inject({ method: 'POST', url: '/session-input/evidence/read',
+        headers: { 'x-happier-daemon-token': 'token' }, payload });
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json()).toEqual({ ok: true, result: {
+        sessionId: 'session_1234', afterSeq: 16, serverMessageSeq: 17, pendingLocalIds: [],
+        rows: [{ seq: 17, kind: 'switch_event', toProfileId: 'clemens2',
+                 actionId: 'action_1234' }],
+      } });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('authenticates an exact hold, keeps it durable, and releases only its action', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'happier-usage-control-'));
     const store = createSessionInputHoldStore(dir);
