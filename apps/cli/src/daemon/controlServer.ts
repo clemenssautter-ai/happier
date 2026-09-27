@@ -145,6 +145,10 @@ const SessionBindingSnapshotSchema = z.object({
     groupId: z.string().nullable(), revision: z.number().int().nonnegative(),
   }).nullable(),
 });
+const ConnectedServiceProfilePreflightResultSchema = z.object({
+  serviceId: z.literal('claude-subscription'), profileId: z.string().min(1),
+  observedAt: z.number().int().positive(), usable: z.boolean(),
+}).strict();
 type SessionBindingSnapshot = z.infer<typeof SessionBindingSnapshotSchema>;
 const ControlledSessionEvidenceSchema = z.object({
   sessionId: z.string().min(1), afterSeq: z.number().int().nonnegative(),
@@ -394,6 +398,7 @@ export function createDaemonControlApp({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleConnectedServiceProfilePreflight,
   handleSessionInputHold,
   handleSessionControlledSend,
   handleSessionControlledResume,
@@ -475,6 +480,9 @@ export function createDaemonControlApp({
     attemptId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleConnectedServiceProfilePreflight?: (input: Readonly<{
+    serviceId: 'claude-subscription'; profileId: string;
+  }>) => Promise<z.infer<typeof ConnectedServiceProfilePreflightResultSchema>>;
   handleSessionInputHold?: (input: Readonly<{
     sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
   }>) => Readonly<{ ok: boolean; held: boolean }>;
@@ -721,6 +729,35 @@ export function createDaemonControlApp({
     }
     const result = await handleSessionConnectedServiceAuthSwitch(request.body);
     return { ok: true as const, result };
+  });
+
+  typed.post('/connected-service-auth/profile/preflight', {
+    schema: {
+      body: z.object({ serviceId: z.literal('claude-subscription'), profileId: z.string().trim().min(1) }).strict(),
+      response: {
+        200: z.object({ ok: z.literal(true), result: ConnectedServiceProfilePreflightResultSchema }),
+        401: authSchema401,
+        503: z.object({ ok: z.literal(false), errorCode: z.literal('profile_preflight_unavailable') }),
+      },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    if (!handleConnectedServiceProfilePreflight) {
+      reply.code(503);
+      return { ok: false as const, errorCode: 'profile_preflight_unavailable' as const };
+    }
+    try {
+      const result = ConnectedServiceProfilePreflightResultSchema.parse(
+        await handleConnectedServiceProfilePreflight(request.body),
+      );
+      if (result.serviceId !== request.body.serviceId || result.profileId !== request.body.profileId) {
+        throw new Error('profile preflight identity mismatch');
+      }
+      return { ok: true as const, result };
+    } catch {
+      reply.code(503);
+      return { ok: false as const, errorCode: 'profile_preflight_unavailable' as const };
+    }
   });
 
   typed.post('/session-input/hold', {
@@ -2404,6 +2441,7 @@ export function startDaemonControlServer({
   handleConnectedServiceTurnLifecycle,
   handleConnectedServiceUsageLimitWaitResumeCancel,
   handleSessionConnectedServiceAuthSwitch,
+  handleConnectedServiceProfilePreflight,
   handleSessionInputHold,
   handleSessionControlledSend,
   handleSessionControlledResume,
@@ -2475,6 +2513,9 @@ export function startDaemonControlServer({
     attemptId: string;
   }>) => Promise<unknown>;
   handleSessionConnectedServiceAuthSwitch?: (input: Readonly<SessionConnectedServiceAuthSwitchRpcParams>) => Promise<unknown>;
+  handleConnectedServiceProfilePreflight?: (input: Readonly<{
+    serviceId: 'claude-subscription'; profileId: string;
+  }>) => Promise<z.infer<typeof ConnectedServiceProfilePreflightResultSchema>>;
   handleSessionInputHold?: (input: Readonly<{
     sessionId: string; actionId: string; operation: 'hold' | 'release' | 'status';
   }>) => Readonly<{ ok: boolean; held: boolean }>;
@@ -2544,6 +2585,7 @@ export function startDaemonControlServer({
       handleConnectedServiceTurnLifecycle,
       handleConnectedServiceUsageLimitWaitResumeCancel,
       handleSessionConnectedServiceAuthSwitch,
+      handleConnectedServiceProfilePreflight,
       handleSessionInputHold,
       handleSessionControlledSend,
       handleSessionControlledResume,

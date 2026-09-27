@@ -397,6 +397,7 @@ import { resolveUnsupportedSwitchContinuityErrorCode } from './connectedServices
 import { createSessionConnectedServiceAuthHotApply } from './connectedServices/sessionAuthSwitch/sessionConnectedServiceAuthHotApply';
 import { createSessionConnectedServiceAccountAdoptionVerifier } from './connectedServices/accountTransitions/createSessionConnectedServiceAccountAdoptionVerifier';
 import { resolveInactiveConnectedServiceSessionForAuthSwitch } from './connectedServices/sessionAuthSwitch/resolveInactiveConnectedServiceSessionForAuthSwitch';
+import { preflightConnectedServiceProfile } from './connectedServices/sessionAuthSwitch/preflightConnectedServiceProfile';
 import { dispatchConnectedServiceCredentialHealthNotificationAsync } from './connectedServices/notifications/dispatchConnectedServiceCredentialHealthNotification';
 import { dispatchConnectedServiceAutomaticQuotaResetNotificationAsync, dispatchConnectedServiceQuotaLifecycleNotificationAsync } from './connectedServices/notifications/dispatchConnectedServiceQuotaLifecycleNotification';
 import { commitConnectedServiceQuotaLifecycleSessionEvents } from './connectedServices/quotas/commitConnectedServiceQuotaLifecycleSessionEvents';
@@ -6716,6 +6717,12 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         });
       },
       handleConnectedServiceUsageLimitWaitResumeCancel: cancelConnectedServiceUsageLimitWaitResumeForSession,
+      handleConnectedServiceProfilePreflight: async ({ serviceId, profileId }) => {
+        if (serviceId !== 'claude-subscription') throw new Error('profile preflight service mismatch');
+        return preflightConnectedServiceProfile({
+          profileId, listConnectedServiceProfiles: api.listConnectedServiceProfiles.bind(api),
+        });
+      },
       handleSessionConnectedServiceAuthSwitch: async (input) => {
         const inputHold = sessionInputHoldStore.status(input.sessionId);
         if (inputHold?.held && inputHold.actionId !== input.controlledActionId) {

@@ -9,6 +9,62 @@ import { createDaemonControlApp } from './controlServer';
 import { createSessionInputHoldStore } from './sessionInputHold/sessionInputHoldStore';
 
 describe('daemon session input hold control', () => {
+  it('requires daemon authentication and returns only a fresh target-profile preflight verdict', async () => {
+    const app = createDaemonControlApp({
+      getChildren: () => [], machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({ type: 'error' as const,
+                                  errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+                                  errorMessage: 'unused' }),
+      requestShutdown: () => {}, onHappySessionWebhook: () => {}, controlToken: 'token',
+      handleConnectedServiceProfilePreflight: async ({ serviceId, profileId }) => ({
+        serviceId, profileId, observedAt: 123, usable: true,
+      }),
+    });
+    try {
+      const payload = { serviceId: 'claude-subscription', profileId: 'clemens2' };
+      const denied = await app.inject({ method: 'POST',
+        url: '/connected-service-auth/profile/preflight', payload });
+      expect(denied.statusCode).toBe(401);
+      const accepted = await app.inject({ method: 'POST',
+        url: '/connected-service-auth/profile/preflight',
+        headers: { 'x-happier-daemon-token': 'token' }, payload });
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json()).toEqual({ ok: true, result: {
+        serviceId: 'claude-subscription', profileId: 'clemens2', observedAt: 123, usable: true,
+      } });
+      const invalid = await app.inject({ method: 'POST',
+        url: '/connected-service-auth/profile/preflight',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { serviceId: 'claude-subscription', profileId: '' } });
+      expect(invalid.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('fails closed when the target-profile inventory cannot be read', async () => {
+    const app = createDaemonControlApp({
+      getChildren: () => [], machineId: 'machine',
+      stopSession: async () => ({ status: 'not_found' as const }),
+      spawnSession: async () => ({ type: 'error' as const,
+                                  errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+                                  errorMessage: 'unused' }),
+      requestShutdown: () => {}, onHappySessionWebhook: () => {}, controlToken: 'token',
+      handleConnectedServiceProfilePreflight: async () => { throw new Error('private upstream body'); },
+    });
+    try {
+      const response = await app.inject({ method: 'POST',
+        url: '/connected-service-auth/profile/preflight',
+        headers: { 'x-happier-daemon-token': 'token' },
+        payload: { serviceId: 'claude-subscription', profileId: 'clemens2' } });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({ ok: false, errorCode: 'profile_preflight_unavailable' });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns an authenticated fresh binding snapshot instead of echoing switch input', async () => {
     const app = createDaemonControlApp({
       getChildren: () => [], machineId: 'machine',
