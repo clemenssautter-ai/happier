@@ -128,6 +128,11 @@ describe('session input hold', () => {
     writeFileSync(lock, JSON.stringify({
       v: 1, pid: 2_147_483_647, token: 'dead-owner-token',
     }));
+    const staleClaim = `${lock}.reclaim.dead-owner-token`;
+    mkdirSync(staleClaim);
+    writeFileSync(join(staleClaim, 'owner.json'), JSON.stringify({
+      v: 1, pid: 2_147_483_647, token: 'dead-reclaimer-token',
+    }));
     const source = new URL('./sessionInputHoldStore.ts', import.meta.url).href;
     const script = `
       import { createSessionInputHoldStore } from ${JSON.stringify(source)};
@@ -182,5 +187,57 @@ describe('session input hold', () => {
     } finally {
       child.kill('SIGKILL');
     }
+  });
+
+  it('recovers a dead reclaim owner without releasing a competing action', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(true);
+    expect(store.release('session-a', 'action-a')).toBe(true);
+    const lock = join(dir, 'session-input-holds', 'session-a.lock');
+    writeFileSync(lock, JSON.stringify({ v: 1, pid: 2_147_483_647, token: 'dead-lock-token' }));
+    const claim = `${lock}.reclaim.dead-lock-token`;
+    const child = spawn(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      fs.mkdirSync(process.argv[1]);
+      fs.writeFileSync(path.join(process.argv[1], 'owner.json'), JSON.stringify({
+        v: 1, pid: process.pid, token: 'dead-reclaimer-token',
+      }));
+      process.stdout.write('claimed\\n');
+      setInterval(() => {}, 1000);
+    `, claim], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      await once(child.stdout!, 'data');
+      expect(store.isHeld('session-a')).toBe(true);
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+      expect(createSessionInputHoldStore(dir).hold('session-a', 'action-b')).toBe(true);
+      expect(store.hold('session-a', 'action-c')).toBe(false);
+      expect(store.release('session-a', 'action-a')).toBe(false);
+      expect(store.status('session-a')).toEqual({ actionId: 'action-b', held: true });
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('keeps a dead lock fenced when its reclaim owner is live or unknown', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    const holdsDir = join(dir, 'session-input-holds');
+    mkdirSync(holdsDir);
+    const lock = join(holdsDir, 'session-a.lock');
+    writeFileSync(lock, JSON.stringify({ v: 1, pid: 2_147_483_647, token: 'dead-lock-token' }));
+    const claim = `${lock}.reclaim.dead-lock-token`;
+    mkdirSync(claim);
+    const ownerFile = join(claim, 'owner.json');
+    writeFileSync(ownerFile, JSON.stringify({ v: 1, pid: process.pid, token: 'live-claim-token' }));
+    expect(store.hold('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+    writeFileSync(ownerFile, '{unknown');
+    expect(store.hold('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
   });
 });

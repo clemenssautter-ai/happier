@@ -52,27 +52,49 @@ function reclaimDeadLock(lock: string): boolean {
   const observed = readLockOwner(lock);
   if (!observed || !ownerIsDead(observed)) return false;
   const claim = `${lock}.reclaim.${observed.token}`;
+  const claimant = { pid: process.pid, token: randomUUID() };
+  const staged = `${claim}.${claimant.token}.tmp`;
+  mkdirSync(staged, { mode: 0o700 });
+  const ownerFile = join(staged, 'owner.json');
   try {
-    mkdirSync(claim, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    return false;
-  }
-  try {
+    const fd = openSync(ownerFile, 'wx', 0o600);
+    try {
+      writeSync(fd, JSON.stringify({ v: 1, ...claimant }));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    const stagedFd = openSync(staged, 'r');
+    try { fsyncSync(stagedFd); } finally { closeSync(stagedFd); }
+    if (existsSync(claim)) {
+      const previous = readLockOwner(join(claim, 'owner.json'));
+      // An empty legacy claim has no provable owner and stays closed.
+      if (!previous || !ownerIsDead(previous)) return false;
+      // The nonempty retired destination is a permanent ABA fence: a delayed
+      // reclaimer cannot rename a successor claim over this owner's tombstone.
+      renameSync(claim, `${claim}.retired.${previous.token}`);
+    }
+    // Both stage and claim are nonempty directories. Rename cannot replace an
+    // active claim; a dead claimant can be retired on the next invocation.
+    renameSync(staged, claim);
+    if (readLockOwner(join(claim, 'owner.json'))?.token !== claimant.token) return false;
     // Another reclaimer may have removed the old lock and a new writer
-    // acquired this path. The token-scoped claim remains outside the new lock
-    // so a delayed reclaimer cannot disturb that writer's cleanup.
+    // acquired this path. The token-scoped claim remains outside the new lock.
     const current = readLockOwner(lock);
     if (!current || current.pid !== observed.pid || current.token !== observed.token
         || !ownerIsDead(current)) return false;
     unlinkSync(lock);
-    rmdirSync(claim);
     return true;
   } catch {
-    // An interrupted/ambiguous reclaim remains fail-closed.
+    // Ambiguous ownership or a concurrent claimant remains fail-closed.
     return false;
   } finally {
-    if (existsSync(claim)) rmdirSync(claim);
+    if (readLockOwner(join(claim, 'owner.json'))?.token === claimant.token) {
+      try { renameSync(claim, `${claim}.retired.${claimant.token}`); } catch { /* Keep claim. */ }
+    }
+    if (existsSync(staged)) {
+      try { unlinkSync(ownerFile); rmdirSync(staged); } catch { /* Inert staging only. */ }
+    }
   }
 }
 
