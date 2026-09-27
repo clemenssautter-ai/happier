@@ -25,7 +25,7 @@ type LockOwner = Readonly<{ pid: number; token: string }>;
 
 function readLockOwner(lock: string): LockOwner | null {
   try {
-    const raw: unknown = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8'));
+    const raw: unknown = JSON.parse(readFileSync(lock, 'utf8'));
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
     const candidate = (raw as { v?: unknown; pid?: unknown; token?: unknown });
     if (candidate.v !== 1 || !Number.isSafeInteger(candidate.pid)
@@ -59,15 +59,14 @@ function reclaimDeadLock(lock: string): boolean {
     return false;
   }
   try {
-    // Another reclaimer may have removed the old directory and a new writer
+    // Another reclaimer may have removed the old lock and a new writer
     // acquired this path. The token-scoped claim remains outside the new lock
     // so a delayed reclaimer cannot disturb that writer's cleanup.
     const current = readLockOwner(lock);
     if (!current || current.pid !== observed.pid || current.token !== observed.token
         || !ownerIsDead(current)) return false;
-    unlinkSync(join(lock, 'owner.json'));
+    unlinkSync(lock);
     rmdirSync(claim);
-    rmdirSync(lock);
     return true;
   } catch {
     // An interrupted/ambiguous reclaim remains fail-closed.
@@ -83,29 +82,35 @@ export function createSessionInputHoldStore(activeServerDir: string) {
     const path = fileFor(activeServerDir, sessionId);
     const lock = path.slice(0, -'.json'.length) + '.lock';
     mkdirSync(holdsDir, { recursive: true, mode: 0o700 });
+    // Prepare the complete owner record before the atomic hardlink claim.
+    // A crash before linkSync leaves only an inert staging file, never an
+    // empty lock whose owner cannot be identified after restart.
+    const staged = `${lock}.${randomUUID()}.tmp`;
+    const fd = openSync(staged, 'wx', 0o600);
+    try {
+      writeSync(fd, JSON.stringify({ v: 1, pid: process.pid, token: randomUUID() }));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    let acquired = false;
     const acquire = (): boolean => {
       try {
-        mkdirSync(lock, { mode: 0o700 });
+        linkSync(staged, lock);
+        acquired = true;
         return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         return false;
       }
     };
-    if (!acquire() && (!reclaimDeadLock(lock) || !acquire())) return false;
-    const owner = join(lock, 'owner.json');
     try {
-      const fd = openSync(owner, 'wx', 0o600);
-      try {
-        writeSync(fd, JSON.stringify({ v: 1, pid: process.pid, token: randomUUID() }));
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      if (!acquire() && (!reclaimDeadLock(lock) || !acquire())) return false;
+      syncParent(path);
       return mutate();
     } finally {
-      if (existsSync(owner)) unlinkSync(owner);
-      rmdirSync(lock);
+      if (acquired) unlinkSync(lock);
+      if (existsSync(staged)) unlinkSync(staged);
     }
   }
   function writeState(path: string, sessionId: string, actionId: string, state: 'held' | 'released'): string {
