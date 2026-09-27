@@ -1,4 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -52,5 +54,107 @@ describe('session input hold', () => {
     expect(competing.hold('session-a', 'action-b')).toBe(false);
     expect(first.release('session-a', 'action-a')).toBe(false);
     expect(competing.status('session-a')).toEqual({ actionId: 'action-a', held: false });
+  });
+
+  it('recovers a lock left by a killed writer without admitting two actions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const first = createSessionInputHoldStore(dir);
+    expect(first.hold('session-a', 'action-a')).toBe(true);
+    expect(first.release('session-a', 'action-a')).toBe(true);
+
+    const lock = join(dir, 'session-input-holds', 'session-a.lock');
+    const child = spawn(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      fs.mkdirSync(process.argv[1]);
+      fs.writeFileSync(require('node:path').join(process.argv[1], 'owner.json'),
+        JSON.stringify({ v: 1, pid: process.pid, token: 'killed-owner-token' }));
+      process.stdout.write('ready\\n');
+      setInterval(() => {}, 1000);
+    `, lock], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      await once(child.stdout!, 'data');
+      expect(first.isHeld('session-a')).toBe(true);
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+      const second = createSessionInputHoldStore(dir);
+      expect(second.hold('session-a', 'action-b')).toBe(true);
+      expect(first.hold('session-a', 'action-c')).toBe(false);
+      expect(first.release('session-a', 'action-a')).toBe(false);
+      expect(first.status('session-a')).toEqual({ actionId: 'action-b', held: true });
+      expect(first.isHeld('session-a')).toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('does not reclaim a lock owned by a live process or an unknown owner', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const lock = join(dir, 'session-input-holds', 'session-a.lock');
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({
+      v: 1, pid: process.pid, token: 'living-owner-token',
+    }));
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+    writeFileSync(join(lock, 'owner.json'), '{broken');
+    expect(store.hold('session-a', 'action-a')).toBe(false);
+    expect(store.isHeld('session-a')).toBe(true);
+  });
+
+  it('resumes the same action after a dead writer left an active hold', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(true);
+    const lock = join(dir, 'session-input-holds', 'session-a.lock');
+    mkdirSync(lock);
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({
+      v: 1, pid: 2_147_483_647, token: 'dead-owner-token',
+    }));
+    expect(createSessionInputHoldStore(dir).hold('session-a', 'action-a')).toBe(true);
+    expect(store.hold('session-a', 'action-b')).toBe(false);
+    expect(store.release('session-a', 'action-a')).toBe(true);
+    expect(store.hold('session-a', 'action-b')).toBe(true);
+  });
+
+  it('lets only one of two processes claim a recovered session', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'happier-usage-hold-'));
+    dirs.push(dir);
+    const store = createSessionInputHoldStore(dir);
+    expect(store.hold('session-a', 'action-a')).toBe(true);
+    expect(store.release('session-a', 'action-a')).toBe(true);
+    const lock = join(dir, 'session-input-holds', 'session-a.lock');
+    mkdirSync(lock);
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({
+      v: 1, pid: 2_147_483_647, token: 'dead-owner-token',
+    }));
+    const source = new URL('./sessionInputHoldStore.ts', import.meta.url).href;
+    const script = `
+      import { createSessionInputHoldStore } from ${JSON.stringify(source)};
+      const held = createSessionInputHoldStore(process.env.HOLD_TEST_DIR)
+        .hold('session-a', process.env.HOLD_TEST_ACTION);
+      process.stdout.write(JSON.stringify({ held }));
+    `;
+    const children = ['action-b', 'action-c'].map((action) => spawn(process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', script], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOLD_TEST_DIR: dir, HOLD_TEST_ACTION: action },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }));
+    const outcomes = await Promise.all(children.map(async (child) => {
+      let output = '';
+      let errors = '';
+      child.stdout!.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr!.on('data', (chunk: Buffer) => { errors += chunk.toString(); });
+      const [code] = await once(child, 'close');
+      expect(code, errors).toBe(0);
+      return JSON.parse(output) as { held: boolean };
+    }));
+    expect(outcomes.filter((item) => item.held)).toHaveLength(1);
+    expect(store.isHeld('session-a')).toBe(true);
+    expect(['action-b', 'action-c']).toContain(store.status('session-a')?.actionId);
   });
 });

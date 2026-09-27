@@ -21,21 +21,90 @@ function stateFrom(path: string): { actionId: string; held: boolean } | null {
   }
 }
 
+type LockOwner = Readonly<{ pid: number; token: string }>;
+
+function readLockOwner(lock: string): LockOwner | null {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const candidate = (raw as { v?: unknown; pid?: unknown; token?: unknown });
+    if (candidate.v !== 1 || !Number.isSafeInteger(candidate.pid)
+        || (candidate.pid as number) <= 0
+        || typeof candidate.token !== 'string'
+        || !/^[A-Za-z0-9_-]{8,128}$/.test(candidate.token)) return null;
+    return { pid: candidate.pid as number, token: candidate.token };
+  } catch {
+    return null;
+  }
+}
+
+function ownerIsDead(owner: LockOwner): boolean {
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    // EPERM, unsupported platforms and any uncertain result preserve the fence.
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
+function reclaimDeadLock(lock: string): boolean {
+  const observed = readLockOwner(lock);
+  if (!observed || !ownerIsDead(observed)) return false;
+  const claim = `${lock}.reclaim.${observed.token}`;
+  try {
+    mkdirSync(claim, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    return false;
+  }
+  try {
+    // Another reclaimer may have removed the old directory and a new writer
+    // acquired this path. The token-scoped claim remains outside the new lock
+    // so a delayed reclaimer cannot disturb that writer's cleanup.
+    const current = readLockOwner(lock);
+    if (!current || current.pid !== observed.pid || current.token !== observed.token
+        || !ownerIsDead(current)) return false;
+    unlinkSync(join(lock, 'owner.json'));
+    rmdirSync(claim);
+    rmdirSync(lock);
+    return true;
+  } catch {
+    // An interrupted/ambiguous reclaim remains fail-closed.
+    return false;
+  } finally {
+    if (existsSync(claim)) rmdirSync(claim);
+  }
+}
+
 export function createSessionInputHoldStore(activeServerDir: string) {
   const holdsDir = join(activeServerDir, 'session-input-holds');
   function withMutationLock(sessionId: string, mutate: () => boolean): boolean {
     const path = fileFor(activeServerDir, sessionId);
     const lock = path.slice(0, -'.json'.length) + '.lock';
     mkdirSync(holdsDir, { recursive: true, mode: 0o700 });
+    const acquire = (): boolean => {
+      try {
+        mkdirSync(lock, { mode: 0o700 });
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        return false;
+      }
+    };
+    if (!acquire() && (!reclaimDeadLock(lock) || !acquire())) return false;
+    const owner = join(lock, 'owner.json');
     try {
-      mkdirSync(lock, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
-      throw error;
-    }
-    try {
+      const fd = openSync(owner, 'wx', 0o600);
+      try {
+        writeSync(fd, JSON.stringify({ v: 1, pid: process.pid, token: randomUUID() }));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       return mutate();
     } finally {
+      if (existsSync(owner)) unlinkSync(owner);
       rmdirSync(lock);
     }
   }
