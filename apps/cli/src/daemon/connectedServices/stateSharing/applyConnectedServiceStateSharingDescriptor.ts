@@ -388,7 +388,7 @@ function applyRewriteTomlSetStringValues(
 }
 
 function tomlTableIdentity(line: string, tablePrefix: string): string | null {
-  const match = /^\s*\[([A-Za-z0-9_.-]+)\.("(?:[^"\\]|\\.)*")\]\s*$/.exec(line);
+  const match = /^\s*\[([A-Za-z0-9_.-]+)\.("(?:[^"\\]|\\.)*")\]\s*(?:#.*)?$/.exec(line);
   if (!match || match[1] !== tablePrefix) return null;
   try {
     const identity: unknown = JSON.parse(match[2]);
@@ -422,7 +422,7 @@ function preserveTomlTableValues(input: Readonly<{
       continue;
     }
     if (identity === null) continue;
-    const match = /^\s*([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*$/.exec(line);
+    const match = /^\s*([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*(?:#.*)?$/.exec(line);
     if (!match || match[1] !== input.valueKey) continue;
     try {
       const parsed: unknown = JSON.parse(match[2]);
@@ -449,8 +449,12 @@ function preserveTomlTableValues(input: Readonly<{
 
 async function buildDescriptorCopyTransformByEntry(
   input: ApplyConnectedServiceStateSharingDescriptorInput,
-): Promise<Readonly<Record<string, (content: string) => string>>> {
+): Promise<Readonly<{
+  byEntry: Readonly<Record<string, (content: string) => string>>;
+  entriesWithRetainedValue: ReadonlySet<string>;
+}>> {
   const transforms: Record<string, (content: string) => string> = {};
+  const entriesWithRetainedValue = new Set<string>();
   for (const transform of input.descriptor.transforms ?? []) {
     const previousTransform = transforms[transform.entry] ?? ((content: string) => content);
     if (transform.kind === 'rewrite_toml') {
@@ -473,6 +477,13 @@ async function buildDescriptorCopyTransformByEntry(
         throw error;
       }
       const identityPath = join(priorRoot, transform.spec.identityEntry);
+      if (preserveTomlTableValues({
+        current: '', previous: priorContent,
+        tablePrefix: transform.spec.tablePrefix,
+        identityPath, valueKey: transform.spec.valueKey,
+      }).length > 0) {
+        entriesWithRetainedValue.add(transform.entry);
+      }
       transforms[transform.entry] = (content) => preserveTomlTableValues({
         current: previousTransform(content),
         previous: priorContent,
@@ -484,7 +495,7 @@ async function buildDescriptorCopyTransformByEntry(
     }
     throw new Error('Unsupported connected-service descriptor transform kind');
   }
-  return transforms;
+  return { byEntry: transforms, entriesWithRetainedValue };
 }
 
 function dedupeManifestEntries(entries: readonly string[]): string[] {
@@ -574,13 +585,25 @@ export async function applyConnectedServiceStateSharingDescriptor(
         continue;
       }
       const sourceStat = await tryStatConnectedServiceHomeEntry(sourcePath);
-      if (!sourceStat) continue;
+      if (!sourceStat) {
+        if (entryMode === 'copied'
+          && descriptorCopyTransformByEntry.entriesWithRetainedValue.has(entryName)) {
+          const retained = descriptorCopyTransformByEntry.byEntry[entryName]?.('');
+          if (retained) {
+            await prepareManagedConnectedServiceHomeDestination(destinationPath);
+            await mkdir(dirname(destinationPath), { recursive: true });
+            await writeFile(destinationPath, retained, 'utf8');
+            configEntries.push(entryName);
+          }
+        }
+        continue;
+      }
       await prepareManagedConnectedServiceHomeDestination(destinationPath);
       if (entryMode === 'copied') {
         await copyEntryWithOptionalTransform({
           sourcePath,
           destinationPath,
-          transform: input.copyTransformByEntry?.[entryName] ?? descriptorCopyTransformByEntry[entryName],
+          transform: input.copyTransformByEntry?.[entryName] ?? descriptorCopyTransformByEntry.byEntry[entryName],
         });
       } else {
         try {
@@ -589,7 +612,7 @@ export async function applyConnectedServiceStateSharingDescriptor(
           await copyEntryWithOptionalTransform({
             sourcePath,
             destinationPath,
-            transform: input.copyTransformByEntry?.[entryName] ?? descriptorCopyTransformByEntry[entryName],
+            transform: input.copyTransformByEntry?.[entryName] ?? descriptorCopyTransformByEntry.byEntry[entryName],
           });
         }
       }
