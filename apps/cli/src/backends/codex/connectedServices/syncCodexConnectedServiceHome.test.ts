@@ -447,6 +447,61 @@ describe('syncCodexConnectedServiceHome', () => {
     }
   });
 
+  it.each([false, true])('preserves Codex hook trust after a repeated sync when source config exists: %s', async (sourceConfigExists) => {
+    const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
+    try {
+      if (sourceConfigExists) {
+        await writeFile(join(sourceCodexHome, 'config.toml'), 'model = "source"\n');
+      }
+      const syncCodexConnectedServiceHome = await loadSyncCodexConnectedServiceHome();
+      const sync = () => syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        accountSettings: settings('linked', 'isolated'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+      await sync();
+      const trustedHook = `${join(destinationCodexHome, 'hooks.json')}:Stop:0:0`;
+      const trustSection = `[hooks.state.${JSON.stringify(trustedHook)}]\ntrusted_hash = "${'a'.repeat(64)}"\n`;
+      await writeFile(join(destinationCodexHome, 'config.toml'),
+        `${sourceConfigExists ? 'model = "source"\n' : ''}${trustSection}`);
+
+      await sync();
+
+      const config = await readFile(join(destinationCodexHome, 'config.toml'), 'utf8');
+      expect(config).toContain(trustSection);
+      expect(config.match(/trusted_hash/g)).toHaveLength(1);
+      if (sourceConfigExists) expect(config).toContain('model = "source"');
+      const manifest = JSON.parse(await readFile(join(destinationCodexHome, '.happier-state-sharing.json'), 'utf8')) as { configEntries: string[] };
+      expect(manifest.configEntries).toContain('config.toml');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('carries native hook trust from the promoted home into a staged replacement', async () => {
+    const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
+    try {
+      const syncCodexConnectedServiceHome = await loadSyncCodexConnectedServiceHome();
+      const previousCodexHome = join(root, 'promoted', 'codex-home');
+      await mkdir(previousCodexHome, { recursive: true });
+      const trustSection = `[hooks.state.${JSON.stringify(`${join(previousCodexHome, 'hooks.json')}:stop:0:0`)}]\ntrusted_hash = "sha256:${'a'.repeat(64)}"\n`;
+      await writeFile(join(previousCodexHome, 'config.toml'), `[hooks.state]\n\n${trustSection}`);
+
+      await syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        previousCodexHome,
+        accountSettings: settings('linked', 'isolated'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+
+      const stagedConfig = await readFile(join(destinationCodexHome, 'config.toml'), 'utf8');
+      expect(stagedConfig).toContain(trustSection);
+      expect(stagedConfig.match(/trusted_hash/g)).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('removes only manifest-managed config when config sharing is isolated after being enabled', async () => {
     const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
     try {
