@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -304,6 +304,73 @@ describe('materializeConnectedServicesForSpawn', () => {
     await expect(lstat(join(second!.env.CODEX_HOME!, 'config.toml'))).rejects.toThrow();
     await expect(lstat(join(second!.env.CODEX_HOME!, 'prompts'))).rejects.toThrow();
     await expect(lstat(join(second!.env.CODEX_HOME!, 'sessions'))).rejects.toThrow();
+  });
+
+  it('keeps copied Codex hooks and native hook trust through a staged profile replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-hook-trust-'));
+    try {
+      const sourceCodexHome = join(root, 'source');
+      const baseDir = join(root, 'materialized');
+      const activeServerDir = join(root, 'server');
+      await mkdir(sourceCodexHome, { recursive: true });
+      await writeFile(join(sourceCodexHome, 'config.toml'), 'model = "first"\n');
+      await writeFile(join(sourceCodexHome, 'hooks.json'), '{"hooks":{"Stop":[]}}\n');
+      const record = buildConnectedServiceCredentialRecord({
+        now: 10,
+        serviceId: 'openai-codex',
+        profileId: 'synthetic',
+        kind: 'oauth',
+        expiresAt: null,
+        oauth: {
+          accessToken: 'synthetic-access',
+          refreshToken: 'synthetic-refresh',
+          idToken: 'synthetic-id',
+          scope: null,
+          tokenType: null,
+          providerAccountId: 'synthetic-account',
+          providerEmail: null,
+        },
+      });
+      const run = () => materializeConnectedServicesForSpawn({
+        agentId: 'codex',
+        materializationKey: 'same-profile',
+        activeServerDir,
+        baseDir,
+        connectedAccountMaterializationAuthority: LEGACY_UNFENCED_ONE_SHOT_MATERIALIZATION_AUTHORITY,
+        recordsByServiceId: new Map([['openai-codex', record]]),
+        accountSettings: {
+          connectedServicesProviderStateSharingSettingsV1: {
+            v: 1,
+            defaults: { configMode: 'linked', stateMode: 'isolated' },
+            byAgentId: { codex: { configMode: 'linked', stateMode: 'isolated' } },
+            acknowledgedRisksByAgentId: {},
+          },
+        },
+        processEnv: { CODEX_HOME: sourceCodexHome, HOME: root },
+      });
+
+      const first = await run();
+      expect(first).not.toBeNull();
+      const codexHome = first!.env.CODEX_HOME!;
+      const hooksPath = join(codexHome, 'hooks.json');
+      expect((await lstat(hooksPath)).isFile()).toBe(true);
+      expect((await lstat(hooksPath)).isSymbolicLink()).toBe(false);
+      const trustSection = `[hooks.state.${JSON.stringify(`${hooksPath}:stop:0:0`)}]\ntrusted_hash = "sha256:${'a'.repeat(64)}"\n`;
+      await writeFile(join(codexHome, 'config.toml'), `model = "first"\n\n${trustSection}`);
+      await writeFile(join(sourceCodexHome, 'config.toml'), 'model = "second"\n');
+      await writeFile(join(sourceCodexHome, 'hooks.json'), '{"hooks":{"SessionStart":[]}}\n');
+      await expect(readFile(hooksPath, 'utf8')).resolves.toBe('{"hooks":{"Stop":[]}}\n');
+
+      const second = await run();
+      expect(second?.env.CODEX_HOME).toBe(codexHome);
+      expect((await lstat(hooksPath)).isSymbolicLink()).toBe(false);
+      await expect(readFile(hooksPath, 'utf8')).resolves.toBe('{"hooks":{"SessionStart":[]}}\n');
+      const config = await readFile(join(codexHome, 'config.toml'), 'utf8');
+      expect(config).toContain('model = "second"');
+      expect(config).toContain(trustSection);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('materializes the exact-v0.2.1 OpenCode XDG auth file without probing the refresh token', async () => {
