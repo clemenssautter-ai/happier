@@ -384,6 +384,15 @@ describe('materializeConnectedServicesForSpawn', () => {
       const thirdManifest = JSON.parse(await readFile(
         join(codexHome, '.happier-state-sharing.json'), 'utf8'));
       expect(thirdManifest.configEntries).toContain('hooks.json');
+      const receipt = JSON.parse(await readFile(
+        join(codexHome, '.happier-state-sharing-copy-receipt.json'), 'utf8'));
+      expect(receipt.producer).toBe('happier.connectedServices.materialize');
+      expect(receipt.effectiveRoot).toBe(codexHome);
+      expect(receipt.previous?.entries?.['hooks.json']).toBeDefined();
+      expect(receipt.current.entries['hooks.json'].source.sha256).toBe(
+        receipt.current.entries['hooks.json'].target.sha256);
+      expect(receipt.previousTargetBeforeSync['hooks.json']).toEqual(
+        receipt.previous.entries['hooks.json'].target);
 
       await rm(join(sourceCodexHome, 'config.toml'));
       const fourth = await run();
