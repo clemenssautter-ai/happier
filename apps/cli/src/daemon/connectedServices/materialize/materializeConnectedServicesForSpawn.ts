@@ -28,6 +28,7 @@ import {
   resolveConnectedServiceNativeHomeRoot,
 } from '@/daemon/connectedServices/stateSharing/applyConnectedServiceStateSharingDescriptor';
 import { writeConnectedServiceStateSharingManifest } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingManifest';
+import { writeCopiedConfigEntryReceipt } from '@/daemon/connectedServices/stateSharing/copiedConfigEntryReceipt';
 import { materializeConnectedServiceNativeHomeCredentials } from '@/daemon/connectedServices/stateSharing/materializeConnectedServiceNativeHomeCredentials';
 import type {
   ConnectedServiceResolvedSelection,
@@ -345,15 +346,16 @@ async function materializeQualifiedConnectedAccountLaunchForSpawn(params: Readon
           ?.connectedServicesProviderStateSharingSettingsV1,
         params.agentId,
       );
+      const sourceRoot = resolveConnectedServiceNativeHomeRoot({
+        nativeHome: stateSharingDescriptor.nativeHome,
+        sourceEnvironment,
+        homeDir: homedir(),
+      });
       const stateSharing = await applyConnectedServiceStateSharingDescriptor({
         descriptor: stateSharingDescriptor,
         previousMaterializedRoot: params.previousRootDir,
         nativeSourceContext: {
-          sourceRoot: resolveConnectedServiceNativeHomeRoot({
-            nativeHome: stateSharingDescriptor.nativeHome,
-            sourceEnvironment,
-            homeDir: homedir(),
-          }),
+          sourceRoot,
           sourceEnv: sourceEnvironment,
         },
         target: {
@@ -371,6 +373,17 @@ async function materializeQualifiedConnectedAccountLaunchForSpawn(params: Readon
       });
       diagnostics.push(...stateSharing.diagnostics);
       await writeConnectedServiceStateSharingManifest(params.rootDir, stateSharing.manifest);
+      if (params.previousRootDir && policy.configMode !== 'isolated') {
+        await writeCopiedConfigEntryReceipt({
+          sourceRoot,
+          stagedRoot: params.rootDir,
+          effectiveRoot: params.previousRootDir,
+          entryNames: stateSharingDescriptor.config.entries
+            .filter((entry) => entry.mode === 'force_copied'
+              && stateSharing.manifest.configEntries.includes(entry.path))
+            .map((entry) => entry.path),
+        });
+      }
 
       const nativeHomeFiles: Record<string, Uint8Array> = Object.create(null);
       for (const scope of projectionOnlyGeminiOauth
