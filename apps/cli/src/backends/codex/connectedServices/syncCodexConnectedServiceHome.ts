@@ -23,6 +23,7 @@ import {
 } from '@/daemon/connectedServices/stateSharing/importConnectedServiceSessionFiles';
 
 import { resolveConfiguredCodexSqliteHome } from './codexStateFileNames';
+import { capturePreviousCodexHooksCopy, writeCodexHooksCopyReceipt } from './codexHooksCopyReceipt';
 import { reconcileCodexSharedJsonlState } from './reconcileCodexSharedJsonlState';
 
 const CODEX_IMPORTABLE_SESSION_HOME_ENTRIES = Object.freeze([
@@ -219,6 +220,11 @@ export async function syncCodexConnectedServiceHome(params: Readonly<{
     }
 
     await mkdir(params.destinationCodexHome, { recursive: true });
+    const previousHooksCopy = await capturePreviousCodexHooksCopy({
+      sourceCodexHome,
+      destinationCodexHome: params.destinationCodexHome,
+      previousCodexHome: params.previousCodexHome ?? null,
+    });
     const manifest = await readConnectedServiceStateSharingManifest(params.destinationCodexHome);
     const configEntryNames = await resolveCodexConfigEntryNames(sourceCodexHome);
     const stateEntryNames = codexConnectedServiceStateSharingDescriptor.state.entries.map((entry) => entry.path);
@@ -272,6 +278,12 @@ export async function syncCodexConnectedServiceHome(params: Readonly<{
 
     await writeConnectedServiceStateSharingManifest(params.destinationCodexHome, applyResult.manifest);
     await removeLegacyConnectedServiceStateSharingManifest(params.destinationCodexHome);
+    await writeCodexHooksCopyReceipt({
+      sourceCodexHome,
+      destinationCodexHome: params.destinationCodexHome,
+      previousCodexHome: params.previousCodexHome ?? null,
+      previous: previousHooksCopy,
+    });
 
     return {
       providerId: 'codex',

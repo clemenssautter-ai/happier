@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 import { expect, it } from 'vitest';
 
+import { CODEX_HOOKS_COPY_RECEIPT_NAME } from '@/backends/codex/connectedServices/codexHooksCopyReceipt';
 import { readConnectedServiceStateSharingManifest } from '../stateSharing/connectedServiceStateSharingManifest';
 import { materializeConnectedServicesForSpawn } from './materializeConnectedServicesForSpawn';
 import { resolveConnectedServiceMaterializedRootDir } from './resolveConnectedServiceMaterializedRootDir';
@@ -89,6 +90,7 @@ it('proves two real Codex materializations migrate an old hooks link and refresh
       const sourceStat = await lstat(sourceHooksPath);
       const targetStat = await lstat(targetHooksPath);
       const manifest = await readConnectedServiceStateSharingManifest(targetHome);
+      const receipt = JSON.parse(await readFile(join(targetHome, CODEX_HOOKS_COPY_RECEIPT_NAME), 'utf8'));
       return {
         sourceSha256: sha256(await readFile(sourceHooksPath)),
         targetSha256: sha256(await readFile(targetHooksPath)),
@@ -108,6 +110,7 @@ it('proves two real Codex materializations migrate an old hooks link and refresh
           stateEntries: manifest.stateEntries,
           diagnostics: manifest.diagnostics,
         },
+        receipt,
       };
     };
 
@@ -118,6 +121,9 @@ it('proves two real Codex materializations migrate an old hooks link and refresh
     expect(afterFirst.target.symbolicLink).toBe(false);
     expect(afterFirst.targetSha256).toBe(sha256(firstHooks));
     expect(afterFirst.manifest.configEntries).toContain('hooks.json');
+    expect(afterFirst.receipt.previous).toBeNull();
+    expect(afterFirst.receipt.current.source.sha256).toBe(sha256(firstHooks));
+    expect(afterFirst.receipt.current.target.sha256).toBe(sha256(firstHooks));
 
     await writeFile(sourceHooksPath, secondHooks);
     const beforeSecond = await snapshot();
@@ -131,6 +137,11 @@ it('proves two real Codex materializations migrate an old hooks link and refresh
     expect(afterSecond.target.symbolicLink).toBe(false);
     expect(afterSecond.targetSha256).toBe(afterSecond.sourceSha256);
     expect(afterSecond.targetSha256).toBe(sha256(secondHooks));
+    expect(afterSecond.receipt.previous.nonce).toBe(afterFirst.receipt.current.nonce);
+    expect(afterSecond.receipt.previousTargetBeforeSync.sha256).toBe(sha256(firstHooks));
+    expect(afterSecond.receipt.current.source.sha256).toBe(sha256(secondHooks));
+    expect(afterSecond.receipt.current.target.sha256).toBe(sha256(secondHooks));
+    expect(afterSecond.receipt.loadedModule.sha256).toMatch(/^[a-f0-9]{64}$/);
 
     if (proofPath) {
       await mkdir(dirname(proofPath), { recursive: true });
