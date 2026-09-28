@@ -364,12 +364,61 @@ describe('syncCodexConnectedServiceHome', () => {
       expect(copiedConfig).toContain('cli_auth_credentials_store = "file"');
       await expect(readFile(join(destinationCodexHome, 'environments.toml'), 'utf8')).resolves.toBe('[env.default]\n');
       await expect(readFile(join(destinationCodexHome, 'hooks.json'), 'utf8')).resolves.toBe('{"hooks":[]}\n');
+      expect((await lstat(join(destinationCodexHome, 'hooks.json'))).isSymbolicLink()).toBe(false);
+      await writeFile(join(sourceCodexHome, 'hooks.json'), '{"hooks":[{"changed":true}]}\n');
+      await expect(readFile(join(destinationCodexHome, 'hooks.json'), 'utf8')).resolves.toBe('{"hooks":[]}\n');
+      await syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        accountSettings: settings('linked', 'isolated'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+      expect((await lstat(join(destinationCodexHome, 'hooks.json'))).isSymbolicLink()).toBe(false);
+      await expect(readFile(join(destinationCodexHome, 'hooks.json'), 'utf8')).resolves.toBe('{"hooks":[{"changed":true}]}\n');
       await expect(readFile(join(destinationCodexHome, 'instructions.md'), 'utf8')).resolves.toBe('legacy instructions\n');
       await expect(readFile(join(destinationCodexHome, 'rules', 'default.rules'), 'utf8')).resolves.toBe('prefix_rule(pattern=["git"], decision="allow")\n');
       await expect(readFile(join(destinationCodexHome, 'agents', 'reviewer', 'config.toml'), 'utf8')).resolves.toBe('name = "reviewer"\n');
       await expect(readFile(join(destinationCodexHome, 'skills', 'reviewer', 'SKILL.md'), 'utf8')).resolves.toBe('# Reviewer\n');
       await expect(readFile(join(destinationCodexHome, 'skills', '.system', 'builtin.md'), 'utf8')).resolves.toBe('built in\n');
       await expect(exists(join(destinationCodexHome, 'config.json'))).resolves.toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a previously linked hooks file with a copy in shared-state mode', async () => {
+    const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
+    try {
+      const sourceHooks = join(sourceCodexHome, 'hooks.json');
+      const targetHooks = join(destinationCodexHome, 'hooks.json');
+      await writeFile(sourceHooks, '{"hooks":{"Stop":[]}}\n');
+      await mkdir(destinationCodexHome, { recursive: true });
+      await symlink(sourceHooks, targetHooks, 'file');
+      await writeFile(join(destinationCodexHome, '.happier-state-sharing.json'), JSON.stringify({
+        v: 1,
+        requestedStateMode: 'shared',
+        effectiveStateMode: 'shared',
+        configEntries: ['hooks.json'],
+        stateEntries: [],
+      }));
+      const syncCodexConnectedServiceHome = await loadSyncCodexConnectedServiceHome();
+
+      await syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        accountSettings: settings('linked', 'shared'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+      expect((await lstat(targetHooks)).isSymbolicLink()).toBe(false);
+      await expect(readFile(targetHooks, 'utf8')).resolves.toBe('{"hooks":{"Stop":[]}}\n');
+
+      await writeFile(sourceHooks, '{"hooks":{"SessionStart":[]}}\n');
+      await expect(readFile(targetHooks, 'utf8')).resolves.toBe('{"hooks":{"Stop":[]}}\n');
+      await syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        accountSettings: settings('linked', 'shared'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+      expect((await lstat(targetHooks)).isSymbolicLink()).toBe(false);
+      await expect(readFile(targetHooks, 'utf8')).resolves.toBe('{"hooks":{"SessionStart":[]}}\n');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
