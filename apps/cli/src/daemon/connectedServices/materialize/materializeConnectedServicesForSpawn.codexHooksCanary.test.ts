@@ -142,6 +142,8 @@ it('proves two real Codex materializations migrate an old hooks link and refresh
     expect(afterSecond.receipt.current.source.sha256).toBe(sha256(secondHooks));
     expect(afterSecond.receipt.current.target.sha256).toBe(sha256(secondHooks));
     expect(afterSecond.receipt.loadedModule.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(afterSecond.receipt.ownerProcess.pid).toBe(process.pid);
+    expect(afterSecond.receipt.ownerProcess.procStartTicks).toMatch(/^\d+$/);
 
     if (proofPath) {
       await mkdir(dirname(proofPath), { recursive: true });

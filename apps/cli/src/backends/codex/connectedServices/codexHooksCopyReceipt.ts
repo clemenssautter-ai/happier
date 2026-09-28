@@ -28,6 +28,11 @@ type HooksCopyReceipt = Readonly<{
   sourceCodexHome: string;
   effectiveCodexHome: string;
   loadedModule: Readonly<{ path: string; sha256: string }>;
+  ownerProcess: Readonly<{
+    pid: number;
+    entrypoint: string | null;
+    procStartTicks: string | null;
+  }>;
   previous: SyncObservation | null;
   previousTargetBeforeSync: FileObservation | null;
   current: SyncObservation;
@@ -35,6 +40,17 @@ type HooksCopyReceipt = Readonly<{
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function linuxProcessStartTicks(): Promise<string | null> {
+  if (process.platform !== 'linux') return null;
+  try {
+    const stat = await readFile('/proc/self/stat', 'utf8');
+    const fieldsAfterComm = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+    return /^\d+$/.test(fieldsAfterComm[19] ?? '') ? fieldsAfterComm[19] : null;
+  } catch {
+    return null;
+  }
 }
 
 async function observeRegularFile(path: string): Promise<FileObservation | null> {
@@ -129,6 +145,11 @@ export async function writeCodexHooksCopyReceipt(params: Readonly<{
     sourceCodexHome: sourceHome,
     effectiveCodexHome: resolve(params.previousCodexHome ?? params.destinationCodexHome),
     loadedModule: { path: modulePath, sha256: sha256(await readFile(modulePath)) },
+    ownerProcess: {
+      pid: process.pid,
+      entrypoint: process.argv[1] ? resolve(process.argv[1]) : null,
+      procStartTicks: await linuxProcessStartTicks(),
+    },
     previous: validPrevious,
     previousTargetBeforeSync: validPrevious ? priorTarget : null,
     current: {
