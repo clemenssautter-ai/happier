@@ -355,9 +355,12 @@ describe('materializeConnectedServicesForSpawn', () => {
       const hooksPath = join(codexHome, 'hooks.json');
       expect((await lstat(hooksPath)).isFile()).toBe(true);
       expect((await lstat(hooksPath)).isSymbolicLink()).toBe(false);
-      const trustSection = `[hooks.state.${JSON.stringify(`${hooksPath}:stop:0:0`)}]\ntrusted_hash = "sha256:${'a'.repeat(64)}"\n`;
-      await writeFile(join(codexHome, 'config.toml'), `model = "first"\n\n${trustSection}`);
-      await writeFile(join(sourceCodexHome, 'config.toml'), 'model = "second"\n');
+      const trustHeader = `[hooks.state.${JSON.stringify(`${hooksPath}:stop:0:0`)}]`;
+      const trustSection = `${trustHeader}\ntrusted_hash = "sha256:${'a'.repeat(64)}"\n`;
+      await writeFile(join(codexHome, 'config.toml'),
+        `model = "first"\n\n${trustHeader} # native trust\ntrusted_hash = "sha256:${'a'.repeat(64)}" # accepted\n`);
+      await writeFile(join(sourceCodexHome, 'config.toml'),
+        `model = "second"\n\n${trustHeader} # stale source copy\ntrusted_hash = "sha256:${'b'.repeat(64)}"\n`);
       await writeFile(join(sourceCodexHome, 'hooks.json'), '{"hooks":{"SessionStart":[]}}\n');
       await expect(readFile(hooksPath, 'utf8')).resolves.toBe('{"hooks":{"Stop":[]}}\n');
 
@@ -375,6 +378,13 @@ describe('materializeConnectedServicesForSpawn', () => {
       const steadyConfig = await readFile(join(codexHome, 'config.toml'), 'utf8');
       expect(steadyConfig.match(/trusted_hash/g)).toHaveLength(1);
       expect(steadyConfig).toContain(trustSection);
+
+      await rm(join(sourceCodexHome, 'config.toml'));
+      const fourth = await run();
+      expect(fourth?.env.CODEX_HOME).toBe(codexHome);
+      const sourceMissingConfig = await readFile(join(codexHome, 'config.toml'), 'utf8');
+      expect(sourceMissingConfig).toContain(trustSection);
+      expect(sourceMissingConfig.match(/trusted_hash/g)).toHaveLength(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
