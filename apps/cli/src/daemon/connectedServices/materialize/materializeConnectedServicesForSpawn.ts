@@ -27,6 +27,7 @@ import {
   applyConnectedServiceStateSharingDescriptor,
   resolveConnectedServiceNativeHomeRoot,
 } from '@/daemon/connectedServices/stateSharing/applyConnectedServiceStateSharingDescriptor';
+import { writeConnectedServiceStateSharingManifest } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingManifest';
 import { materializeConnectedServiceNativeHomeCredentials } from '@/daemon/connectedServices/stateSharing/materializeConnectedServiceNativeHomeCredentials';
 import type {
   ConnectedServiceResolvedSelection,
@@ -369,6 +370,7 @@ async function materializeQualifiedConnectedAccountLaunchForSpawn(params: Readon
         [stateSharingDescriptor.nativeHome.environmentKey]: params.rootDir,
       });
       diagnostics.push(...stateSharing.diagnostics);
+      await writeConnectedServiceStateSharingManifest(params.rootDir, stateSharing.manifest);
 
       const nativeHomeFiles: Record<string, Uint8Array> = Object.create(null);
       for (const scope of projectionOnlyGeminiOauth
