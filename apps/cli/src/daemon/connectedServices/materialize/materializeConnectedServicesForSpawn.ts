@@ -204,6 +204,7 @@ async function materializeQualifiedConnectedAccountLaunchForSpawn(params: Readon
   agentId: CatalogAgentId;
   materializationKey: string;
   rootDir: string;
+  previousRootDir?: string;
   sessionDirectory?: string | null;
   processEnv?: NodeJS.ProcessEnv;
   accountSettings?: AccountSettings | Readonly<Record<string, unknown>> | null;
@@ -345,6 +346,7 @@ async function materializeQualifiedConnectedAccountLaunchForSpawn(params: Readon
       );
       const stateSharing = await applyConnectedServiceStateSharingDescriptor({
         descriptor: stateSharingDescriptor,
+        previousMaterializedRoot: params.previousRootDir,
         nativeSourceContext: {
           sourceRoot: resolveConnectedServiceNativeHomeRoot({
             nativeHome: stateSharingDescriptor.nativeHome,
@@ -542,6 +544,7 @@ async function materializeConnectedServicesForSpawnUnlocked(params: Readonly<{
     ? async () => await materializeQualifiedConnectedAccountLaunchForSpawn({
         ...params,
         rootDir: attemptRoot,
+        previousRootDir: rootDir,
         snapshot: qualifiedPurposeBindingSnapshot,
         recordsByServiceId: params.recordsByServiceId,
         ...(exactPurposeBindingSubjectId
@@ -557,6 +560,7 @@ async function materializeConnectedServicesForSpawnUnlocked(params: Readonly<{
       ? async () => await materializeQualifiedConnectedAccountLaunchForSpawn({
           ...params,
           rootDir: attemptRoot,
+          previousRootDir: rootDir,
           snapshot: qualifiedPurposeBindingSnapshot,
           recordsByServiceId: params.recordsByServiceId,
           requestAuthRequired: false,

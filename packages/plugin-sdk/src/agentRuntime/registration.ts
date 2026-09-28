@@ -312,13 +312,23 @@ export type AgentConnectedAccountStateSharingDescriptorEntryV1 = Readonly<{
   secret?: boolean;
 }>;
 
-export type AgentConnectedAccountStateSharingDescriptorTransformV1 = Readonly<{
-  entry: string;
-  kind: 'rewrite_toml';
-  spec: Readonly<{
-    setStringValues: Readonly<Record<string, string>>;
+export type AgentConnectedAccountStateSharingDescriptorTransformV1 =
+  | Readonly<{
+    entry: string;
+    kind: 'rewrite_toml';
+    spec: Readonly<{
+      setStringValues: Readonly<Record<string, string>>;
+    }>;
+  }>
+  | Readonly<{
+    entry: string;
+    kind: 'preserve_toml_table_value';
+    spec: Readonly<{
+      tablePrefix: string;
+      identityEntry: string;
+      valueKey: string;
+    }>;
   }>;
-}>;
 
 export type AgentConnectedAccountStateSharingDynamicEntryPatternV1 = Readonly<{
   scope: 'config' | 'state';

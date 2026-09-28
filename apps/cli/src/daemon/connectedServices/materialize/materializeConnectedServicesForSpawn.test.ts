@@ -368,6 +368,13 @@ describe('materializeConnectedServicesForSpawn', () => {
       const config = await readFile(join(codexHome, 'config.toml'), 'utf8');
       expect(config).toContain('model = "second"');
       expect(config).toContain(trustSection);
+
+      const third = await run();
+      expect(third?.env.CODEX_HOME).toBe(codexHome);
+      expect((await lstat(hooksPath)).isSymbolicLink()).toBe(false);
+      const steadyConfig = await readFile(join(codexHome, 'config.toml'), 'utf8');
+      expect(steadyConfig.match(/trusted_hash/g)).toHaveLength(1);
+      expect(steadyConfig).toContain(trustSection);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -40,6 +40,7 @@ export type TargetMaterializationContext = Readonly<{
 export type ApplyConnectedServiceStateSharingDescriptorInput = Readonly<{
   descriptor: ConnectedServiceStateSharingDescriptor;
   nativeSourceContext: NativeSourceContext;
+  previousMaterializedRoot?: string;
   existingMaterializedStateContext?: ExistingMaterializedStateContext;
   target: TargetMaterializationContext;
   configMode: 'linked' | 'copied' | 'isolated';
@@ -386,16 +387,102 @@ function applyRewriteTomlSetStringValues(
   return resultLines.join('\n');
 }
 
-function buildDescriptorCopyTransformByEntry(
-  descriptor: ConnectedServiceStateSharingDescriptor,
-): Readonly<Record<string, (content: string) => string>> {
-  const transforms: Record<string, (content: string) => string> = {};
-  for (const transform of descriptor.transforms ?? []) {
-    if (transform.kind === 'rewrite_toml') {
-      transforms[transform.entry] = (content) => applyRewriteTomlSetStringValues(content, transform.spec.setStringValues);
+function tomlTableIdentity(line: string, tablePrefix: string): string | null {
+  const match = /^\s*\[([A-Za-z0-9_.-]+)\.("(?:[^"\\]|\\.)*")\]\s*$/.exec(line);
+  if (!match || match[1] !== tablePrefix) return null;
+  try {
+    const identity: unknown = JSON.parse(match[2]);
+    return typeof identity === 'string' ? identity : null;
+  } catch {
+    return null;
+  }
+}
+
+function preserveTomlTableValues(input: Readonly<{
+  current: string;
+  previous: string;
+  tablePrefix: string;
+  identityPath: string;
+  valueKey: string;
+}>): string {
+  const sections: string[] = [];
+  let identity: string | null = null;
+  let value: string | null = null;
+  const flush = () => {
+    if (identity !== null && value !== null) {
+      sections.push(`[${input.tablePrefix}.${JSON.stringify(identity)}]\n${input.valueKey} = ${JSON.stringify(value)}\n`);
+    }
+  };
+  for (const line of input.previous.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) {
+      flush();
+      const candidate = tomlTableIdentity(line, input.tablePrefix);
+      identity = candidate?.startsWith(`${input.identityPath}:`) ? candidate : null;
+      value = null;
       continue;
     }
-    throw new Error(`Unsupported connected-service descriptor transform kind: ${transform.kind}`);
+    if (identity === null) continue;
+    const match = /^\s*([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*$/.exec(line);
+    if (!match || match[1] !== input.valueKey) continue;
+    try {
+      const parsed: unknown = JSON.parse(match[2]);
+      if (typeof parsed === 'string' && parsed.length > 0) value = parsed;
+    } catch {
+      // Invalid values do not become native trust declarations.
+    }
+  }
+  flush();
+  if (sections.length === 0) return input.current;
+
+  let skip = false;
+  const retained: string[] = [];
+  for (const line of input.current.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) {
+      const candidate = tomlTableIdentity(line, input.tablePrefix);
+      skip = candidate?.startsWith(`${input.identityPath}:`) ?? false;
+    }
+    if (!skip) retained.push(line);
+  }
+  const base = retained.join('\n').trimEnd();
+  return `${base}${base ? '\n\n' : ''}${sections.join('\n')}`;
+}
+
+async function buildDescriptorCopyTransformByEntry(
+  input: ApplyConnectedServiceStateSharingDescriptorInput,
+): Promise<Readonly<Record<string, (content: string) => string>>> {
+  const transforms: Record<string, (content: string) => string> = {};
+  for (const transform of input.descriptor.transforms ?? []) {
+    const previousTransform = transforms[transform.entry] ?? ((content: string) => content);
+    if (transform.kind === 'rewrite_toml') {
+      transforms[transform.entry] = (content) => applyRewriteTomlSetStringValues(
+        previousTransform(content), transform.spec.setStringValues,
+      );
+      continue;
+    }
+    if (transform.kind === 'preserve_toml_table_value') {
+      const priorRoot = input.previousMaterializedRoot;
+      if (!priorRoot) continue;
+      const priorPath = join(priorRoot, transform.entry);
+      let priorContent: string;
+      try {
+        const priorStat = await lstat(priorPath);
+        if (!priorStat.isFile() || priorStat.isSymbolicLink()) continue;
+        priorContent = await readFile(priorPath, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      const identityPath = join(priorRoot, transform.spec.identityEntry);
+      transforms[transform.entry] = (content) => preserveTomlTableValues({
+        current: previousTransform(content),
+        previous: priorContent,
+        tablePrefix: transform.spec.tablePrefix,
+        identityPath,
+        valueKey: transform.spec.valueKey,
+      });
+      continue;
+    }
+    throw new Error('Unsupported connected-service descriptor transform kind');
   }
   return transforms;
 }
@@ -446,7 +533,7 @@ export async function applyConnectedServiceStateSharingDescriptor(
   const sourceRoot = resolve(input.nativeSourceContext.sourceRoot);
   const envOverrides: Record<string, string> = {};
   const diagnostics: ConnectedServicesMaterializationDiagnostic[] = [];
-  const descriptorCopyTransformByEntry = buildDescriptorCopyTransformByEntry(input.descriptor);
+  const descriptorCopyTransformByEntry = await buildDescriptorCopyTransformByEntry(input);
   const previousManifest = input.existingManifest;
   const configEntryNames = input.configEntryNames ?? input.descriptor.config.entries.map((entry) => entry.path);
   const stateEntryNames = input.stateEntryNames ?? input.descriptor.state.entries.map((entry) => entry.path);

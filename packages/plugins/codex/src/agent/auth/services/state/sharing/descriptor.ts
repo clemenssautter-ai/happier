@@ -7,7 +7,7 @@ export const codexStateSharingDescriptor = {
     entries: [
       { path: 'config.toml', mode: 'force_copied' },
       { path: 'environments.toml', mode: 'linked_or_copied' },
-      { path: 'hooks.json', mode: 'linked_or_copied' },
+      { path: 'hooks.json', mode: 'force_copied' },
       { path: 'AGENTS.md', mode: 'linked_or_copied' },
       { path: 'AGENTS.override.md', mode: 'linked_or_copied' },
       { path: 'instructions.md', mode: 'linked_or_copied' },
@@ -42,6 +42,15 @@ export const codexStateSharingDescriptor = {
         setStringValues: {
           cli_auth_credentials_store: 'file',
         },
+      },
+    },
+    {
+      entry: 'config.toml',
+      kind: 'preserve_toml_table_value',
+      spec: {
+        tablePrefix: 'hooks.state',
+        identityEntry: 'hooks.json',
+        valueKey: 'trusted_hash',
       },
     },
   ],
