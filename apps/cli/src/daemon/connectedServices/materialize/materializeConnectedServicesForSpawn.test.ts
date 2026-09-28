@@ -355,6 +355,9 @@ describe('materializeConnectedServicesForSpawn', () => {
       const hooksPath = join(codexHome, 'hooks.json');
       expect((await lstat(hooksPath)).isFile()).toBe(true);
       expect((await lstat(hooksPath)).isSymbolicLink()).toBe(false);
+      const firstManifest = JSON.parse(await readFile(
+        join(codexHome, '.happier-state-sharing.json'), 'utf8'));
+      expect(firstManifest.configEntries).toContain('hooks.json');
       const trustHeader = `[hooks.state.${JSON.stringify(`${hooksPath}:stop:0:0`)}]`;
       const trustSection = `${trustHeader}\ntrusted_hash = "sha256:${'a'.repeat(64)}"\n`;
       await writeFile(join(codexHome, 'config.toml'),
@@ -378,6 +381,9 @@ describe('materializeConnectedServicesForSpawn', () => {
       const steadyConfig = await readFile(join(codexHome, 'config.toml'), 'utf8');
       expect(steadyConfig.match(/trusted_hash/g)).toHaveLength(1);
       expect(steadyConfig).toContain(trustSection);
+      const thirdManifest = JSON.parse(await readFile(
+        join(codexHome, '.happier-state-sharing.json'), 'utf8'));
+      expect(thirdManifest.configEntries).toContain('hooks.json');
 
       await rm(join(sourceCodexHome, 'config.toml'));
       const fourth = await run();
