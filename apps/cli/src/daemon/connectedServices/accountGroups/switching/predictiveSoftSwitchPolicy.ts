@@ -160,7 +160,26 @@ export function evaluateConnectedServiceSwitchApplyPolicy(input: Readonly<{
   applyMode?: ConnectedServiceSwitchApplyMode | null;
   turnState?: PredictiveSoftSwitchTurnState | null;
   runtimeAuthApply?: ConnectedServiceRuntimeAuthApplyCapability | null;
+  /**
+   * Opt-in for an explicit (`manual`) switch whose transition cannot be applied hot (for example a
+   * single-profile session, which has no shared group auth surface to swap in place): allow the
+   * daemon restart-resume path instead of suppressing it. The caller decides per binding whether the
+   * fallback applies; group switches never set it. Default off keeps the previous behaviour.
+   */
+  allowRestartResumeWhenNotHotApplicable?: boolean;
 }>): ConnectedServiceSwitchApplyPolicyDecision {
+  if (
+    input.allowRestartResumeWhenNotHotApplicable === true
+    && input.context === 'manual'
+    && input.applyMode === 'restart_resume'
+  ) {
+    return {
+      status: 'allow',
+      allowDirectLiveHotApply: true,
+      allowTransportRecycle: false,
+      allowRestartResume: true,
+    };
+  }
   const directLiveOnly =
     (
       input.context !== 'pre_spawn'
