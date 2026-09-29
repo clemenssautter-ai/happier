@@ -502,6 +502,51 @@ describe('syncCodexConnectedServiceHome', () => {
     }
   });
 
+  it.each([
+    ['identical', '{"hooks":{"Stop":[]}}\n', true],
+    ['divergent', '{"hooks":{"Stop":[{"local":true}]}}\n', false],
+  ] as const)('carries native hook trust to the profile hooks path only when hooks.json is %s', async (_label, profileHooks, expectTrusted) => {
+    const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
+    try {
+      const nativeHooks = '{"hooks":{"Stop":[]}}\n';
+      await writeFile(join(sourceCodexHome, 'hooks.json'), nativeHooks);
+      const nativeTrust = `[hooks.state.${JSON.stringify(`${join(sourceCodexHome, 'hooks.json')}:stop:0:0`)}]\ntrusted_hash = "sha256:${'b'.repeat(64)}"\n`;
+      await writeFile(join(sourceCodexHome, 'config.toml'), `model = "source"\n\n${nativeTrust}`);
+      if (profileHooks !== nativeHooks) {
+        // The profile copy reads back different bytes than the native hooks: no trust may be carried.
+        const profileHooksPath = join(destinationCodexHome, 'hooks.json');
+        vi.resetModules();
+        vi.doMock('node:fs/promises', async () => {
+          const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+          return {
+            ...actual,
+            readFile: vi.fn(async (path: unknown, ...rest: unknown[]) => {
+              if (String(path) === profileHooksPath) return Buffer.from(profileHooks);
+              return await (actual.readFile as (...args: unknown[]) => Promise<unknown>)(path, ...rest);
+            }),
+          };
+        });
+      }
+      const syncCodexConnectedServiceHome = await loadSyncCodexConnectedServiceHome();
+
+      await syncCodexConnectedServiceHome({
+        destinationCodexHome,
+        accountSettings: settings('copied', 'isolated'),
+        processEnv: { CODEX_HOME: sourceCodexHome },
+      });
+
+      const profileTrustHeader = `[hooks.state.${JSON.stringify(`${join(destinationCodexHome, 'hooks.json')}:stop:0:0`)}]`;
+      const config = await readFile(join(destinationCodexHome, 'config.toml'), 'utf8');
+      if (expectTrusted) {
+        expect(config).toContain(`${profileTrustHeader}\ntrusted_hash = "sha256:${'b'.repeat(64)}"`);
+      } else {
+        expect(config).not.toContain(profileTrustHeader);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('removes only manifest-managed config when config sharing is isolated after being enabled', async () => {
     const { root, sourceCodexHome, destinationCodexHome } = await createCodexHomePair();
     try {
