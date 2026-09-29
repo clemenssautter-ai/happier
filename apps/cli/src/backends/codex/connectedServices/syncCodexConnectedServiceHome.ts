@@ -1,4 +1,5 @@
 import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 
 import {
@@ -150,6 +151,52 @@ async function readCodexHookTrustSections(effectiveCodexHome: string): Promise<r
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
     throw error;
   }
+}
+
+async function readFileSha256(path: string): Promise<string | null> {
+  try {
+    if (!(await lstat(path)).isFile()) return null;
+    return createHash('sha256').update(await readFile(path)).digest('hex');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function sectionHeaderOf(section: string): string {
+  return section.slice(0, section.indexOf('\n'));
+}
+
+/**
+ * Codex keys hook trust by the absolute hooks.json path. A materialized profile copy therefore starts
+ * untrusted even when its hooks are byte-identical to the native ones the user already trusted.
+ * Carry the native trust over to the profile path, but only when both hooks.json files hash identically;
+ * any divergence carries nothing, so Codex asks for trust again as designed.
+ */
+async function readNativeCodexHookTrustSectionsForProfile(params: Readonly<{
+  sourceCodexHome: string;
+  destinationCodexHome: string;
+  effectiveCodexHome: string;
+}>): Promise<readonly string[]> {
+  const sourceHooksPath = join(params.sourceCodexHome, 'hooks.json');
+  const targetHooksPath = join(params.effectiveCodexHome, 'hooks.json');
+  if (targetHooksPath === sourceHooksPath) return [];
+  const sourceHash = await readFileSha256(sourceHooksPath);
+  if (!sourceHash) return [];
+  if (sourceHash !== await readFileSha256(join(params.destinationCodexHome, 'hooks.json'))) return [];
+  const nativeSections = await readCodexHookTrustSections(params.sourceCodexHome);
+  return nativeSections.map((section) => {
+    const header = sectionHeaderOf(section);
+    const hookId = JSON.parse(/^\[hooks\.state\.("(?:[^"\\]|\\.)*")\]/.exec(header)![1]) as string;
+    const rewritten = `${targetHooksPath}${hookId.slice(sourceHooksPath.length)}`;
+    return `[hooks.state.${JSON.stringify(rewritten)}]${section.slice(header.length)}`;
+  });
+}
+
+function mergeCodexHookTrustSections(base: readonly string[], preferred: readonly string[]): readonly string[] {
+  const byHeader = new Map<string, string>();
+  for (const section of [...base, ...preferred]) byHeader.set(sectionHeaderOf(section), section);
+  return [...byHeader.values()];
 }
 
 async function restoreCodexHookTrustSections(params: Readonly<{
@@ -367,12 +414,20 @@ export async function syncCodexConnectedServiceHome(params: Readonly<{
       }),
     });
 
+    const effectiveCodexHome = params.previousCodexHome ?? params.destinationCodexHome;
+    const nativeHookTrustSections = settings.configMode === 'isolated'
+      ? []
+      : await readNativeCodexHookTrustSectionsForProfile({
+        sourceCodexHome,
+        destinationCodexHome: params.destinationCodexHome,
+        effectiveCodexHome,
+      });
     const restoredHookTrust = settings.configMode === 'isolated'
       ? false
       : await restoreCodexHookTrustSections({
         destinationCodexHome: params.destinationCodexHome,
-        effectiveCodexHome: params.previousCodexHome ?? params.destinationCodexHome,
-        sections: hookTrustSections,
+        effectiveCodexHome,
+        sections: mergeCodexHookTrustSections(hookTrustSections, nativeHookTrustSections),
       });
     const nextManifest = restoredHookTrust && !applyResult.manifest.configEntries.includes('config.toml')
       ? { ...applyResult.manifest, configEntries: [...applyResult.manifest.configEntries, 'config.toml'] }
