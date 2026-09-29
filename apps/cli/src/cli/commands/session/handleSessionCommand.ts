@@ -15,6 +15,7 @@ import { cmdSessionUnarchive } from './unarchive';
 import { cmdSessionSetTitle } from './setTitle';
 import { cmdSessionSetPermissionMode } from './setPermissionMode';
 import { cmdSessionSetModel } from './setModel';
+import { cmdSessionConnectedServicesSwitch } from './connectedServicesSwitch';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
 import { cmdSessionRunGet } from './run/get';
 import { cmdSessionRunList, SESSION_RUN_LIST_USAGE } from './run/list';
@@ -51,6 +52,7 @@ function inferSessionKind(argv: readonly string[]): string {
   if (sub === 'archive') return 'session_archive';
   if (sub === 'unarchive') return 'session_unarchive';
   if (sub === 'history') return 'session_history';
+  if (sub === 'connected-services') return 'session_connected_services_switch';
   if (sub === 'actions') {
     const actionSub = String(argv[1] ?? '').trim();
     if (actionSub === 'list') return 'session_actions_list';
@@ -90,6 +92,7 @@ const SESSION_HELP_BY_COMMAND = {
   'set-title': 'happier session set-title <session-id-or-prefix-or-tag> <title> [--json]',
   'set-permission-mode': 'happier session set-permission-mode <session-id-or-prefix-or-tag> <mode> [--json]',
   'set-model': 'happier session set-model <session-id-or-prefix-or-tag> <model-id> [--json]',
+  'connected-services switch': 'happier session connected-services switch <session-id> --profile <profile-id> [--service <service-id>] [--agent <agent-id>] [--no-restart-resume] [--json]',
   archive: 'happier session archive <session-id-or-prefix-or-tag> [--json]',
   unarchive: 'happier session unarchive <session-id-or-prefix-or-tag> [--json]',
   'review start': 'happier session review start <session-id-or-prefix-or-tag> --engines <id1,id2> [--instructions <text>] [--json]',
@@ -230,6 +233,13 @@ export async function handleSessionCommand(
       case 'unarchive':
         await cmdSessionUnarchive(argv, { readCredentialsFn });
         return;
+      case 'connected-services': {
+        if (String(argv[1] ?? '').trim() !== 'switch') {
+          throw new Error('Usage: happier session connected-services switch <session-id> --profile <profile-id> [--json]');
+        }
+        await cmdSessionConnectedServicesSwitch(argv);
+        return;
+      }
       case 'history':
         await cmdSessionHistory(argv, { readCredentialsFn });
         return;

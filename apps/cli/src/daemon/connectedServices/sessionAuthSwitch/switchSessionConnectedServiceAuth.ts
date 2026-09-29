@@ -244,6 +244,11 @@ export type SessionConnectedServiceAuthSwitchRequest = Readonly<{
   rematerializeServiceId?: ConnectedServiceId;
   expectedGroupGenerationByServiceId?: Readonly<Record<string, number>>;
   accountSettingsVersionHint?: number;
+  /** Optional, versioned policy switches for this request; absent means the previous behaviour. */
+  applyPolicy?: Readonly<{
+    /** Allow restart-resume for single-profile bindings whose transition is not hot-applicable. */
+    allowRestartResume?: boolean;
+  }>;
 }>;
 
 type ConnectedServiceProfilesApi = Readonly<{
@@ -590,6 +595,7 @@ function resolveSwitchApplyPolicy(input: Readonly<{
   groupSwitchTriggerReason: string | undefined;
   applyMode?: 'hot_apply' | 'restart_resume' | 'spawn_next_turn' | 'transport_recycle' | 'direct_live_hot_auth' | null;
   runtimeAuthApply?: ConnectedServiceRuntimeAuthApplyCapability | null;
+  allowRestartResumeWhenNotHotApplicable?: boolean;
 }>): ReturnType<typeof evaluateConnectedServiceSwitchApplyPolicy> {
   const reason = normalizeSwitchApplyReason(input.groupSwitchTriggerReason);
   return evaluateConnectedServiceSwitchApplyPolicy({
@@ -597,17 +603,22 @@ function resolveSwitchApplyPolicy(input: Readonly<{
     reason,
     applyMode: input.applyMode,
     runtimeAuthApply: input.runtimeAuthApply,
+    ...(input.allowRestartResumeWhenNotHotApplicable === true
+      ? { allowRestartResumeWhenNotHotApplicable: true }
+      : {}),
   });
 }
 
 function switchPolicyAllowsDeclaredRestartResume(
   groupSwitchTriggerReason: string | undefined,
   runtimeAuthApply?: ConnectedServiceRuntimeAuthApplyCapability | null,
+  allowRestartResumeWhenNotHotApplicable?: boolean,
 ): boolean {
   return resolveSwitchApplyPolicy({
     groupSwitchTriggerReason,
     applyMode: 'restart_resume',
     runtimeAuthApply,
+    allowRestartResumeWhenNotHotApplicable,
   }).allowRestartResume;
 }
 
@@ -615,6 +626,8 @@ function switchPolicyAllowsDeclaredRestartResumeForServices(input: Readonly<{
   groupSwitchTriggerReason: string | undefined;
   runtimeAuthApplyByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceRuntimeAuthApplyCapability | null>;
   serviceIds: Iterable<ConnectedServiceId>;
+  /** Services whose next binding is a single profile and for which the request opted into restart-resume. */
+  restartResumeFallbackServiceIds?: ReadonlySet<ConnectedServiceId>;
 }>): boolean {
   const serviceIds = Array.from(input.serviceIds);
   if (serviceIds.length === 0) {
@@ -623,6 +636,7 @@ function switchPolicyAllowsDeclaredRestartResumeForServices(input: Readonly<{
   return serviceIds.every((serviceId) => switchPolicyAllowsDeclaredRestartResume(
     input.groupSwitchTriggerReason,
     input.runtimeAuthApplyByServiceId.get(serviceId) ?? null,
+    input.restartResumeFallbackServiceIds?.has(serviceId) === true,
   ));
 }
 
@@ -1560,19 +1574,39 @@ function gatePredictiveSoftSwitchBeforeSideEffects(input: Readonly<{
   });
 }
 
+/**
+ * Services for which the request opted into `applyPolicy.allowRestartResume` AND whose next binding is
+ * a single profile. Group bindings never qualify: a group switch keeps its hot-apply-only policy.
+ */
+function resolveRestartResumeFallbackServiceIds(
+  request: SessionConnectedServiceAuthSwitchRequest | undefined,
+  serviceIds: readonly ConnectedServiceId[],
+): ReadonlySet<ConnectedServiceId> {
+  const result = new Set<ConnectedServiceId>();
+  if (request?.applyPolicy?.allowRestartResume !== true) return result;
+  for (const serviceId of serviceIds) {
+    const binding = request.bindings.bindingsByServiceId[serviceId];
+    if (binding?.source === 'connected' && binding.selection === 'profile') result.add(serviceId);
+  }
+  return result;
+}
+
 function gateRestartResumeBeforeSideEffects(input: Readonly<{
   groupSwitchTriggerReason: string | undefined;
   executionPolicy: SwitchSessionConnectedServiceAuthInput['executionPolicy'];
   runtimeAuthApplyByServiceId: ReadonlyMap<ConnectedServiceId, ConnectedServiceRuntimeAuthApplyCapability | null>;
   serviceIds: Iterable<ConnectedServiceId>;
   diagnosticSource: ConnectedServiceUxDiagnosticV1['source'];
+  request?: SessionConnectedServiceAuthSwitchRequest;
 }>): SessionConnectedServiceAuthSwitchResult | null {
+  const serviceIds = Array.from(input.serviceIds);
   if (
     input.executionPolicy?.allowRestartResume !== false
     && switchPolicyAllowsDeclaredRestartResumeForServices({
       groupSwitchTriggerReason: input.groupSwitchTriggerReason,
       runtimeAuthApplyByServiceId: input.runtimeAuthApplyByServiceId,
-      serviceIds: input.serviceIds,
+      serviceIds,
+      restartResumeFallbackServiceIds: resolveRestartResumeFallbackServiceIds(input.request, serviceIds),
     })
   ) {
     return null;
@@ -1717,6 +1751,7 @@ async function rematerializeUnchangedConnectedServiceBinding(input: Readonly<{
       runtimeAuthApplyByServiceId: new Map([[serviceId, runtimeAuthApply]]),
       serviceIds: [serviceId],
       diagnosticSource: input.diagnosticSource,
+      request: input.request,
     });
     if (restartGate) return restartGate;
   }
@@ -2237,6 +2272,7 @@ export async function switchSessionConnectedServiceAuth(
           runtimeAuthApplyByServiceId,
           serviceIds: changedServiceIds,
           diagnosticSource,
+          request: input.request,
         });
         if (restartGate) return restartGate;
       }
