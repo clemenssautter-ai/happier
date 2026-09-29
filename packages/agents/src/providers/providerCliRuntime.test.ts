@@ -34,7 +34,7 @@ describe('PROVIDER_CLI_RUNTIME_SPECS', () => {
         },
         archiveExtractionLimits: {
           maxFileBytes: 384 * 1024 * 1024,
-          maxExpandedBytes: 384 * 1024 * 1024,
+          maxExpandedBytes: 768 * 1024 * 1024,
         },
       },
     });
@@ -48,8 +48,13 @@ describe('PROVIDER_CLI_RUNTIME_SPECS', () => {
 
     // Checksum-pinned OpenAI release rust-v0.147.0 contains a 298,668,336-byte
     // Codex executable and expands to 370,442,135 bytes across the package.
+    // Codex v0.159.0's Linux musl package expands to 444,288,853 bytes,
+    // including a 286,750,056-byte executable, exceeding the prior 384 MiB
+    // expanded-byte ceiling while staying under it per-file.
     expect(archiveExtractionLimits.maxFileBytes).toBeGreaterThan(298_668_336);
+    expect(archiveExtractionLimits.maxFileBytes).toBeGreaterThan(286_750_056);
     expect(archiveExtractionLimits.maxExpandedBytes).toBeGreaterThan(370_442_135);
+    expect(archiveExtractionLimits.maxExpandedBytes).toBeGreaterThan(444_288_853);
   });
 
   it('declares managed package sources for package-backed CLIs', () => {

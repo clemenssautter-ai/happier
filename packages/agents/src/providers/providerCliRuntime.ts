@@ -216,11 +216,16 @@ export const PROVIDER_CLI_RUNTIME_SPECS: Readonly<Record<AgentId, ProviderCliRun
       },
       // OpenAI Codex rust-v0.147.0's checksum-pinned x64 Windows package
       // expands to 370,442,135 bytes, including one 298,668,336-byte
-      // executable. A 384 MiB ceiling leaves bounded headroom while retaining
-      // generic archive, entry-count, path, and compression-ratio protections.
+      // executable. Codex v0.159.0's Linux musl package
+      // (codex-package-x86_64-unknown-linux-musl.tar.gz) expands to
+      // 444,288,853 bytes, including one 286,750,056-byte executable,
+      // exceeding the prior 384 MiB expanded-byte ceiling. Individual files
+      // stay well under 384 MiB, so only the expanded-byte ceiling moves, to
+      // 768 MiB, leaving headroom while retaining generic archive,
+      // entry-count, path, and compression-ratio protections.
       archiveExtractionLimits: {
         maxFileBytes: 384 * 1024 * 1024,
-        maxExpandedBytes: 384 * 1024 * 1024,
+        maxExpandedBytes: 768 * 1024 * 1024,
       },
     },
     manualInstallKind: 'command',
