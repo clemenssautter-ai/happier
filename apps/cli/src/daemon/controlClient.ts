@@ -507,6 +507,7 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
     rematerializeServiceId?: string;
     expectedGroupGenerationByServiceId?: Readonly<Record<string, number>>;
     accountSettingsVersionHint?: number;
+    applyPolicy?: Readonly<{ allowRestartResume?: boolean }>;
   }>,
   options: DaemonControlRequestOptions = {},
 ): Promise<unknown> {
@@ -523,6 +524,7 @@ export async function requestDaemonSessionConnectedServiceAuthSwitch(
     ...(body.expectedGroupGenerationByServiceId === undefined
       ? {}
       : { expectedGroupGenerationByServiceId: body.expectedGroupGenerationByServiceId }),
+    ...(body.applyPolicy === undefined ? {} : { applyPolicy: body.applyPolicy }),
   }, {
     timeoutMs: resolveDaemonSessionConnectedServiceAuthSwitchTimeoutMs(),
     ...options,
