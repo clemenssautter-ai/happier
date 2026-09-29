@@ -172,6 +172,54 @@ describe('evaluateConnectedServiceSwitchApplyPolicy', () => {
   });
 });
 
+const claudeDirectLiveCapability = {
+  directLiveHotAuth: {
+    supportsInTurnApply: true,
+    requiresExactRuntimeIdentity: false,
+    refreshSelectionResync: 'not_applicable',
+    authMode: { kind: 'provider_owned', name: 'claude_shared_group_auth_surface' },
+  },
+} as const;
+
+describe('evaluateConnectedServiceSwitchApplyPolicy restart-resume fallback', () => {
+  it('allows restart-resume for a manual non-hot transition when the caller opted in', () => {
+    expect(evaluateConnectedServiceSwitchApplyPolicy({
+      context: 'manual',
+      reason: 'manual',
+      applyMode: 'restart_resume',
+      runtimeAuthApply: claudeDirectLiveCapability,
+      allowRestartResumeWhenNotHotApplicable: true,
+    })).toMatchObject({ status: 'allow', allowRestartResume: true, allowTransportRecycle: false });
+  });
+
+  it('keeps the previous suppression when the option is absent or false', () => {
+    for (const option of [undefined, false]) {
+      expect(evaluateConnectedServiceSwitchApplyPolicy({
+        context: 'manual',
+        reason: 'manual',
+        applyMode: 'restart_resume',
+        runtimeAuthApply: claudeDirectLiveCapability,
+        ...(option === undefined ? {} : { allowRestartResumeWhenNotHotApplicable: option }),
+      })).toMatchObject({ status: 'suppress', allowRestartResume: false });
+    }
+  });
+
+  it('never opens restart-resume for automatic group contexts even when the option is set', () => {
+    for (const [context, reason] of [
+      ['healthy_sibling', 'same_provider_account_exhausted'],
+      ['healthy_live_session', 'soft_threshold'],
+    ] as const) {
+      expect(evaluateConnectedServiceSwitchApplyPolicy({
+        context,
+        reason,
+        applyMode: 'restart_resume',
+        runtimeAuthApply: claudeDirectLiveCapability,
+        allowRestartResumeWhenNotHotApplicable: true,
+      }).allowRestartResume).toBe(false);
+    }
+  });
+});
+
 describe('evaluatePredictiveSoftSwitchPolicy', () => {
   it('suppresses live-session predictive soft-threshold switching for restart-only providers', () => {
     expect(evaluatePredictiveSoftSwitchPolicy({
