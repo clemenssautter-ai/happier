@@ -379,6 +379,7 @@ import {
   type ConnectedServiceSwitchTarget,
 } from './connectedServices/sessionAuthSwitch/connectedServiceSwitchDeferralQueue';
 import { requestPlannedRunnerRestart } from './plannedRunnerRestart/requestPlannedRunnerRestart';
+import { createPlannedRestartTerminalHostRetirement } from './plannedRunnerRestart/retireTerminalHostForPlannedRestart';
 import type { PlannedRunnerRestartNotSignaledReason } from './plannedRunnerRestart/types';
 import {
   summarizeSessionRunnerEndpoint,
@@ -4819,6 +4820,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           },
           random: () => Math.random(),
           logDebug: (message, payload) => logger.debug(message, payload),
+          logInfo: (message, payload) => logger.info(message, payload),
           logWarn: (message) => logger.warn(message),
         });
 
@@ -4871,6 +4873,23 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             : 0,
         });
 
+        // One retirement for every planned restart: the primitive decides per reason whether it applies.
+        const retireTerminalHostForPlannedRestart = createPlannedRestartTerminalHostRetirement({
+          happyHomeDir: configuration.happyHomeDir,
+          loadTerminalHostAdapters,
+          retireExactTerminalControlServiceability: async ({ sessionId, attachmentInfo }) =>
+            await retireTerminalControlServiceabilityForCurrentAccount({
+              sessionId,
+              attachmentId: attachmentInfo.attachmentId,
+              terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,
+            }),
+          onExactTerminalAttachmentRetired: async (input) => {
+            physicallyRetiredTerminalAttachmentIdBySessionId.set(input.sessionId, input.attachmentInfo.attachmentId);
+            await notifyTerminalAttachmentRetiredThroughCatalog(input);
+          },
+          logWarn: (message, payload) => logger.warn(message, payload),
+        });
+
         const requestConnectedServiceRestartWithDeferral = async (input: Readonly<{
           sessionId: string;
           tracked: TrackedSession;
@@ -4902,6 +4921,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               },
               restartRequestedPids: connectedServicesRestartRequestedPids,
               pidToTrackedSession,
+              retireTerminalHost: retireTerminalHostForPlannedRestart,
               canSignal: () => resolveSessionRunnerActivityDisabledReason(input.sessionId) ?? true,
               requestSignal: async ({ shouldSignal, onSignalFailure, onProcessAlreadyMissing }) =>
                 // K5:gated_restart raw signal is owned by planned runner restart deferral/reservation.
@@ -5002,6 +5022,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               deferral: { kind: 'none' },
               restartRequestedPids: connectedServicesRestartRequestedPids,
               pidToTrackedSession,
+              retireTerminalHost: retireTerminalHostForPlannedRestart,
               canSignal: () => resolveSessionRunnerActivityDisabledReason(input.sessionId) ?? true,
               requestSignal: async ({ shouldSignal, onSignalFailure, onProcessAlreadyMissing }) =>
                 // K5:gated_restart version refresh uses the planned restart primitive without
@@ -6935,6 +6956,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               },
               transcriptEventOwner: 'switch_fsm',
               onSignalFailureLogMessage: '[DAEMON RUN] Failed to restart connected-service auth-switched session',
+              // A switch that never restarted the runtime must surface as an error, not as a
+              // reported restart: wait until the previous runner is proven retired and replaced.
+              awaitPreviousRunnerRetirement: true,
             });
           },
           hotApply: createSessionConnectedServiceAuthHotApply({

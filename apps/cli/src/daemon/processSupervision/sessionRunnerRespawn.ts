@@ -158,8 +158,11 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
   }>) => void;
   random: () => number;
   logDebug: (message: string, payload?: unknown) => void;
+  /** Outcome-level lines (why a respawn did or did not happen); falls back to `logDebug`. */
+  logInfo?: (message: string, payload?: unknown) => void;
   logWarn: (message: string) => void;
 }>): SessionRunnerRespawnManager {
+  const logInfo = params.logInfo ?? params.logDebug;
   const stopRequestedBySessionId = new Map<string, StopRequest>();
   const stateBySessionId = new Map<
     string,
@@ -277,12 +280,14 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
         const alreadyRunning = await params.isSessionAlreadyRunning(sessionId);
         if (alreadyRunning) {
           endRespawnCycle(sessionId);
+          logInfo(`[DAEMON RUN] Respawn skipped for session ${sessionId}: a runner is already running`, { previousPid });
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'already_running' });
           return;
         }
         const stopRequest = stopRequestedBySessionId.get(sessionId);
         if (stopRequest) {
           endRespawnCycle(sessionId);
+          logInfo(`[DAEMON RUN] Respawn skipped for session ${sessionId}: stop requested`, { previousPid });
           params.onRespawnTerminal?.({ sessionId, previousPid, reason: 'stop_requested' });
           return;
         }
@@ -291,7 +296,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
         const respawnOptions = params.resolveRespawnOptions
           ? await params.resolveRespawnOptions({ sessionId, previousPid, spawnOptions, vendorResumeId, defaultOptions })
           : defaultOptions;
-        params.logDebug(
+        logInfo(
           `[DAEMON RUN] Respawning runner for session ${sessionId} after ${delayMs}ms (attempt ${attempt})`,
           { exit: event, attempt, respawnKind: resolveRespawnKind(event) },
         );
@@ -332,14 +337,14 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
             // handleUnexpectedExit. That staged notification is the single retry owner for the
             // replacement process, so retrying here as well launches competing replacements.
             if (isChildExitedBeforeWebhookSpawnResult(result)) {
-              params.logDebug(
+              logInfo(
                 `[DAEMON RUN] Respawn child exited before webhook for session ${sessionId}; awaiting staged exit notification`,
                 result,
               );
               return;
             }
 
-            params.logDebug(`[DAEMON RUN] Respawn attempt returned non-success for session ${sessionId}`, result);
+            logInfo(`[DAEMON RUN] Respawn attempt returned non-success for session ${sessionId}`, result);
             const retryEvent: TerminationEvent = {
               type: 'spawn_error',
               errorName: 'Error',
@@ -351,7 +356,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
             scheduleRetryFromTermination(sessionId, spawnOptions, vendorResumeId, retryEvent, previousPid);
           })
           .catch((error) => {
-            params.logDebug(`[DAEMON RUN] Failed to respawn runner for session ${sessionId}`, error);
+            logInfo(`[DAEMON RUN] Failed to respawn runner for session ${sessionId}`, error);
             const retryEvent: TerminationEvent = {
               type: 'spawn_error',
               errorName: error instanceof Error ? error.name : 'Error',
@@ -360,7 +365,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
             scheduleRetryFromTermination(sessionId, spawnOptions, vendorResumeId, retryEvent, previousPid);
           });
       })().catch((error) => {
-        params.logDebug(`[DAEMON RUN] Failed to evaluate respawn preflight for session ${sessionId}`, error);
+        logInfo(`[DAEMON RUN] Failed to evaluate respawn preflight for session ${sessionId}`, error);
         const retryEvent: TerminationEvent = {
           type: 'spawn_error',
           errorName: error instanceof Error ? error.name : 'Error',
@@ -394,11 +399,19 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
       }
     },
     handleUnexpectedExit: (trackedSession: TrackedSession, exit: DaemonChildExit, options) => {
-      if (!params.enabled && options?.forceRestart !== true) return;
-      if (trackedSession.startedBy !== 'daemon') return;
+      const forceRestart = options?.forceRestart === true;
+      if (!params.enabled && !forceRestart) return;
+      if (trackedSession.startedBy !== 'daemon') {
+        if (forceRestart) {
+          logInfo('[DAEMON RUN] Forced restart not respawned: runner was not started by this daemon', {
+            pid: trackedSession.pid,
+            startedBy: trackedSession.startedBy,
+          });
+        }
+        return;
+      }
       const sessionId = normalizeSessionId(trackedSession.happySessionId);
       if (!sessionId) return;
-      const forceRestart = options?.forceRestart === true;
       if (forceRestart) {
         // A connected-service-initiated forced restart explicitly supersedes any prior stop request
         // (e.g. a stale flag left by an earlier manual stop that the resume path never cleared --
@@ -410,11 +423,15 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
         stateBySessionId.get(sessionId)?.controller.clearStopRequested();
       }
       const stopRequest = stopRequestedBySessionId.get(sessionId);
-      if (stopRequest) return;
+      if (stopRequest) {
+        if (forceRestart) logInfo(`[DAEMON RUN] Forced restart not respawned for session ${sessionId}: stop requested`);
+        return;
+      }
 
       const spawnOptions = trackedSession.spawnOptions;
       if (!spawnOptions || typeof (spawnOptions as any).directory !== 'string' || !String((spawnOptions as any).directory).trim()) {
         if (forceRestart) {
+          logInfo(`[DAEMON RUN] Forced restart not respawned for session ${sessionId}: missing spawn options`);
           params.onRespawnTerminal?.({ sessionId, previousPid: trackedSession.pid, reason: 'missing_spawn_options' });
         }
         return;
@@ -436,6 +453,7 @@ export function createSessionRunnerRespawnManager(params: Readonly<{
           params.logWarn(`[DAEMON RUN] Session ${sessionId} crashed; respawn suppressed (${decision.reason})`);
         }
         endRespawnCycle(sessionId);
+        logInfo(`[DAEMON RUN] Respawn not scheduled for session ${sessionId}: ${decision.reason}`, { forceRestart });
         params.onRespawnTerminal?.({
           sessionId,
           previousPid: trackedSession.pid,

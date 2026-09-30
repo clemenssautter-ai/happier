@@ -18,7 +18,7 @@ export type TerminalHostDispositionIntent =
     }>
   | Readonly<{
       kind: 'destroy_owned_host';
-      reason: 'explicit_user_stop' | 'unrecoverable_control_recovery';
+      reason: 'explicit_user_stop' | 'unrecoverable_control_recovery' | 'planned_runner_restart';
     }>
   | Readonly<{
       kind: 'retire_confirmed_dead_attachment';
