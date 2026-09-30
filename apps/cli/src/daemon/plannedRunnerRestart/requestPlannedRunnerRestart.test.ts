@@ -21,6 +21,8 @@ function trackedSession(overrides: Partial<TrackedSession> = {}): TrackedSession
   };
 }
 
+const retireNone = async () => ({ status: 'none' as const });
+
 describe('requestPlannedRunnerRestart', () => {
   it('routes connected-service restarts through deferral before reserving and signalling the runner', async () => {
     const tracked = trackedSession();
@@ -49,6 +51,7 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession,
       requestSignal,
+      retireTerminalHost: retireNone,
       logDebug: () => {},
     });
 
@@ -75,6 +78,7 @@ describe('requestPlannedRunnerRestart', () => {
       deferral: { kind: 'none' },
       restartRequestedPids,
       pidToTrackedSession,
+      retireTerminalHost: retireNone,
       requestSignal: async ({ shouldSignal }) => {
         pidToTrackedSession.delete(tracked.pid);
         return shouldSignal() ? { status: 'requested' as const } : { status: 'skipped_stale_owner' as const };
@@ -105,6 +109,7 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession,
       requestSignal,
+      retireTerminalHost: retireNone,
       isProcessSafeToSignal,
       logDebug: () => {},
     });
@@ -137,6 +142,7 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession,
       requestSignal,
+      retireTerminalHost: retireNone,
       canSignal,
       isProcessSafeToSignal: async () => true,
       logDebug: () => {},
@@ -167,6 +173,7 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession,
       requestSignal,
+      retireTerminalHost: retireNone,
       canSignal,
       isProcessSafeToSignal: async () => true,
       logDebug: () => {},
@@ -195,6 +202,7 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession,
       requestSignal: async () => ({ status: 'process_already_missing' as const }),
+      retireTerminalHost: retireNone,
       observeProcessMissing,
       logDebug: () => {},
     });
@@ -230,11 +238,78 @@ describe('requestPlannedRunnerRestart', () => {
       restartRequestedPids,
       pidToTrackedSession: new Map([[tracked.pid, tracked]]),
       requestSignal,
+      retireTerminalHost: retireNone,
       logDebug: () => {},
     });
 
     expect(result).toEqual({ signaled: false, notSignaledReason: 'superseded' });
     expect(requestSignal).not.toHaveBeenCalled();
     expect(restartRequestedPids.size).toBe(0);
+  });
+
+  describe('terminal host retirement', () => {
+    const runRestart = async (input: {
+      reason: 'connected_service_switch' | 'version_runtime_refresh';
+      retireTerminalHost: (input: { sessionId: string }) => Promise<
+        { status: 'none' } | { status: 'destroyed' } | { status: 'failed'; reason: string }
+      >;
+      events: string[];
+    }) => {
+      const tracked = trackedSession();
+      const restartRequestedPids = new Set<number>();
+      const result = await requestPlannedRunnerRestart({
+        sessionId: 'sess-1',
+        tracked,
+        reason: input.reason,
+        deferral: { kind: 'none' },
+        restartRequestedPids,
+        pidToTrackedSession: new Map([[tracked.pid, tracked]]),
+        retireTerminalHost: input.retireTerminalHost,
+        requestSignal: async ({ shouldSignal }) => {
+          if (!await shouldSignal()) return { status: 'skipped_stale_owner' as const };
+          input.events.push('signal');
+          return { status: 'requested' as const };
+        },
+        isProcessSafeToSignal: async () => true,
+        logDebug: () => {},
+        logWarn: () => {},
+      });
+      return { result, restartRequestedPids, tracked };
+    };
+
+    it('retires the terminal host before the runner signal for a connected-service switch', async () => {
+      const events: string[] = [];
+      const { result } = await runRestart({
+        reason: 'connected_service_switch',
+        events,
+        retireTerminalHost: async ({ sessionId }) => {
+          events.push(`retire:${sessionId}`);
+          return { status: 'destroyed' };
+        },
+      });
+      expect(result).toEqual({ signaled: true });
+      expect(events).toEqual(['retire:sess-1', 'signal']);
+    });
+
+    it('does not signal the runner when the terminal host cannot be proven retired', async () => {
+      const events: string[] = [];
+      const { result, restartRequestedPids, tracked } = await runRestart({
+        reason: 'connected_service_switch',
+        events,
+        retireTerminalHost: async () => ({ status: 'failed', reason: 'destroy_failed' }),
+      });
+      expect(result).toEqual({ signaled: false, notSignaledReason: 'terminal_host_not_retired' });
+      expect(events).toEqual([]);
+      expect(restartRequestedPids.has(tracked.pid)).toBe(false);
+    });
+
+    it('keeps the terminal host for a version runtime refresh', async () => {
+      const events: string[] = [];
+      const retire = vi.fn(async () => ({ status: 'destroyed' as const }));
+      const { result } = await runRestart({ reason: 'version_runtime_refresh', events, retireTerminalHost: retire });
+      expect(result).toEqual({ signaled: true });
+      expect(retire).not.toHaveBeenCalled();
+      expect(events).toEqual(['signal']);
+    });
   });
 });
