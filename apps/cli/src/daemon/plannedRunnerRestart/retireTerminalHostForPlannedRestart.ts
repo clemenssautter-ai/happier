@@ -39,11 +39,13 @@ export function createPlannedRestartTerminalHostRetirement(deps: Readonly<{
   }>) => Promise<void>;
   logWarn?: (message: string, payload?: unknown) => void;
 }>): PlannedRunnerRestartTerminalHostRetirement {
-  const readAttachmentInfo = deps.readAttachmentInfo ?? readTerminalAttachmentInfo;
-  const removeAttachmentInfo = deps.removeAttachmentInfo ?? removeTerminalAttachmentInfo;
   const failed = (reason: string): PlannedRunnerRestartTerminalHostRetirementResult => ({ status: 'failed', reason });
 
   return async ({ sessionId }) => {
+    // Resolved per call, not at construction: the daemon builds this at startup, and construction
+    // must not touch attachment-store bindings that only a restart actually needs.
+    const readAttachmentInfo = deps.readAttachmentInfo ?? readTerminalAttachmentInfo;
+    const removeAttachmentInfo = deps.removeAttachmentInfo ?? removeTerminalAttachmentInfo;
     let attachmentInfo;
     try {
       attachmentInfo = await readAttachmentInfo({ happyHomeDir: deps.happyHomeDir, sessionId });
