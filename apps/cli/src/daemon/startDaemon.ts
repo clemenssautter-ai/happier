@@ -370,6 +370,8 @@ import {
   type ConnectedServiceDaemonRestartDiagnosticInput,
   type ConnectedServiceDaemonRestartDiagnosticRecord,
 } from './connectedServices/sessionAuthSwitch/requestConnectedServiceSessionRestartSignal';
+import { resolveConnectedServiceRestartProcessGroupPid } from './connectedServices/sessionAuthSwitch/resolveConnectedServiceRestartProcessGroupPid';
+import { isSessionLocalRefreshApplyFailure } from './connectedServices/sessionAuthSwitch/refreshedAuthApplyFailurePolicy';
 import {
   createConnectedServiceSwitchDeferralQueue,
   type ConnectedServiceSwitchDeferralQueue,
@@ -739,12 +741,6 @@ function toConnectedServiceSwitchEffectiveBinding(
     profileId,
     groupId: null,
   };
-}
-
-function resolveConnectedServiceRestartProcessGroupPid(tracked: TrackedSession): number | null {
-  return tracked.startedBy === 'daemon' && tracked.childProcess && Number.isInteger(tracked.pid) && tracked.pid > 0
-    ? tracked.pid
-    : null;
 }
 
 async function listRetainedConnectedServiceMaterializationIdentityIds(params: Readonly<{
@@ -4942,14 +4938,10 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 logger.debug('[DAEMON RUN] Connected-service restart transcript event failed (non-fatal)', error);
               });
             }
-            if (!completionWaiter) return restart;
-            if (!restart.signaled) {
-              throw Object.assign(
-                new Error(`connected_service_restart_not_signaled:${restart.notSignaledReason ?? 'unknown'}`),
-                { code: 'connected_service_restart_not_signaled', retryable: true },
-              );
-            }
-            if (!input.tracked.childProcess && configuration.daemonSpawnExistingSessionWaitForExitMs > 0) {
+            // A re-attached runner (no child handle after a daemon restart) has no exit event of its
+            // own: observe its retirement here for EVERY caller, otherwise the restart-resume only
+            // happens on the next user message and the old runtime process lingers until then.
+            if (restart.signaled && !input.tracked.childProcess && configuration.daemonSpawnExistingSessionWaitForExitMs > 0) {
               void waitForExistingSessionExitIfStopRequested({
                 sessionId: input.sessionId,
                 pidToTrackedSession,
@@ -4961,6 +4953,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               }).catch((error) => {
                 logger.debug('[DAEMON RUN] Failed to observe connected-service runner retirement for a reattached session', error);
               });
+            }
+            if (!completionWaiter) return restart;
+            if (!restart.signaled) {
+              throw Object.assign(
+                new Error(`connected_service_restart_not_signaled:${restart.notSignaledReason ?? 'unknown'}`),
+                { code: 'connected_service_restart_not_signaled', retryable: true },
+              );
             }
             const completion = await completionWaiter.promise;
             if (!doesRestartCompletionProvePreviousRunnerRetired(completion)) {
@@ -7263,7 +7262,16 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             fromProfileId: activeProfileId,
           });
           if (!result.ok) {
-            if (result.errorCode === 'restart_disallowed_by_execution_policy') continue;
+            if (isSessionLocalRefreshApplyFailure(result.errorCode)) {
+              // One session that cannot take the refreshed credential in place must not fail the
+              // whole refresh notification (that blocks the change sync); it gets it on next start.
+              logger.debug('[DAEMON RUN] Skipping in-place refreshed-credential apply for session', {
+                sessionId,
+                serviceId: event.binding.serviceId,
+                errorCode: result.errorCode,
+              });
+              continue;
+            }
             throw new Error(`connected_service_refreshed_auth_application_failed:${result.errorCode ?? 'unknown'}`);
           }
           if (result.action !== 'hot_applied') continue;
