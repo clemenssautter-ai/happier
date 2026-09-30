@@ -40,7 +40,8 @@ export type PlannedRunnerRestartNotSignaledReason =
   | 'superseded'
   | 'activity_in_progress'
   | 'duplicate_restart'
-  | 'terminal_restart';
+  | 'terminal_restart'
+  | 'terminal_host_not_retired';
 
 export type PlannedRunnerRestartSignalActivityGateResult =
   | boolean
@@ -79,3 +80,21 @@ export type RestartSessionRunnerStatus = RestartSessionRunnerStatusV1;
 export type RestartSessionRunnerRequest = RestartSessionRunnerRequestV1;
 export type RestartSessionRunnerResult = RestartSessionRunnerResultV1;
 export type RestartAllSessionRunnersResult = RestartAllSessionRunnersResultV1;
+
+/**
+ * Outcome of retiring the detached terminal host that carries the runtime (e.g. the Claude Unified
+ * tmux host) of a session whose runner is about to be restarted.
+ *
+ * - `none`: the session has no detached terminal host that outlives its runner (plain terminal,
+ *   runner-in-terminal attachment, no attachment at all), so there is nothing to retire.
+ * - `destroyed`: the exact host was disposed and its attachment descriptor retired.
+ * - `failed`: the host could not be proven gone; the caller must NOT signal the runner.
+ */
+export type PlannedRunnerRestartTerminalHostRetirementResult =
+  | Readonly<{ status: 'none' }>
+  | Readonly<{ status: 'destroyed' }>
+  | Readonly<{ status: 'failed'; reason: string }>;
+
+export type PlannedRunnerRestartTerminalHostRetirement = (input: Readonly<{
+  sessionId: string;
+}>) => Promise<PlannedRunnerRestartTerminalHostRetirementResult>;
