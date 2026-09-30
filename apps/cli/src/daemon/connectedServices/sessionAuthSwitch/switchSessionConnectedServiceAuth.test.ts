@@ -6203,3 +6203,105 @@ describe('switchSessionConnectedServiceAuth', () => {
     });
   });
 });
+
+describe('single-profile restart-resume option', () => {
+  const claudeCapability = {
+    directLiveHotAuth: {
+      supportsInTurnApply: true,
+      requiresExactRuntimeIdentity: false,
+      refreshSelectionResync: 'not_applicable',
+      authMode: { kind: 'provider_owned', name: 'claude_shared_group_auth_surface' },
+    },
+  } as const;
+
+  async function run(input: Readonly<{
+    nextBindings: ConnectedServiceBindingsV1;
+    applyPolicy?: { allowRestartResume?: boolean };
+  }>) {
+    const tracked = trackedSession({
+      spawnOptions: {
+        directory: '/tmp/project',
+        backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        connectedServices: claudeSubscriptionBindings('old-subscription'),
+      },
+    });
+    const restartSession = vi.fn(async () => {});
+    const persistSessionBindings = vi.fn(async () => {});
+    const result = await switchSessionConnectedServiceAuth({
+      core: createCore(),
+      postSwitchVerificationMode: {
+        kind: 'disabled_for_test_only',
+        reason: 'policy gate is decided before provider verification',
+      },
+      getChildren: () => [tracked],
+      api: {
+        listConnectedServiceProfiles: async () => ({
+          serviceId: 'claude-subscription' as const,
+          profiles: [
+            { profileId: 'old-subscription', status: 'connected' as const },
+            { profileId: 'new-subscription', status: 'connected' as const },
+          ],
+        }),
+        getConnectedServiceAuthGroup: async () => null,
+      },
+      resolveContinuity: async () => ({ mode: 'restart_rematerialize' as const }),
+      runtimeAuthApplyCapabilityResolver: () => claudeCapability,
+      restartSession,
+      hotApply: async () => ({ ok: false, errorCode: 'hot_apply_restart_required' }),
+      registerHotApplyTargets: vi.fn(),
+      emitSessionEvent: vi.fn(),
+      persistSessionBindings,
+      request: {
+        sessionId: 'sess_1',
+        agentId: 'claude',
+        bindings: input.nextBindings,
+        ...(input.applyPolicy ? { applyPolicy: input.applyPolicy } : {}),
+      },
+    });
+    return { result, restartSession, persistSessionBindings };
+  }
+
+  it('refuses a running single-profile switch by default (previous behaviour)', async () => {
+    const { result, restartSession, persistSessionBindings } = await run({
+      nextBindings: claudeSubscriptionBindings('new-subscription'),
+    });
+    expect(result).toMatchObject({ ok: false, errorCode: 'restart_disallowed_by_execution_policy' });
+    expect(restartSession).not.toHaveBeenCalled();
+    expect(persistSessionBindings).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the option is explicitly false', async () => {
+    const { result } = await run({
+      nextBindings: claudeSubscriptionBindings('new-subscription'),
+      applyPolicy: { allowRestartResume: false },
+    });
+    expect(result).toMatchObject({ ok: false, errorCode: 'restart_disallowed_by_execution_policy' });
+  });
+
+  it('stores the binding and restarts a running single-profile session when the option is on', async () => {
+    const { result, restartSession, persistSessionBindings } = await run({
+      nextBindings: claudeSubscriptionBindings('new-subscription'),
+      applyPolicy: { allowRestartResume: true },
+    });
+    expect(result).toMatchObject({ ok: true, action: 'restart_requested' });
+    expect(persistSessionBindings).toHaveBeenCalled();
+    expect(restartSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps group bindings on the previous policy even when the option is on', async () => {
+    const groupBindings = {
+      v: 1,
+      bindingsByServiceId: {
+        'claude-subscription': { source: 'connected', selection: 'group', groupId: 'g1' },
+      },
+    } as unknown as ConnectedServiceBindingsV1;
+    const { result, restartSession } = await run({
+      nextBindings: groupBindings,
+      applyPolicy: { allowRestartResume: true },
+    });
+    if (result.ok === false) {
+      expect(result.errorCode).not.toBe('restart_disallowed_by_execution_policy' as never);
+    }
+    expect(restartSession).not.toHaveBeenCalled();
+  });
+});

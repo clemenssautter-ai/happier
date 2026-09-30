@@ -90,6 +90,12 @@ export const SessionConnectedServiceAuthSwitchRpcParamsSchema = z
         rematerializeServiceId: ConnectedServiceIdSchema.optional(),
         expectedGroupGenerationByServiceId: z.record(z.string(), z.number().int().nonnegative()).optional(),
         accountSettingsVersionHint: z.number().int().nonnegative().optional(),
+        applyPolicy: z
+            .object({
+                allowRestartResume: z.boolean().optional(),
+            })
+            .strict()
+            .optional(),
     })
     .strict();
 
