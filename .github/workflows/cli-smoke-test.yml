@@ -14,6 +14,65 @@ on:
   workflow_dispatch:
 
 jobs:
+  session-send-local-id:
+    name: Session send local identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      YARN_PRODUCTION: "false"
+      npm_config_production: "false"
+      HAPPIER_UI_VENDOR_WEB_ASSETS: "0"
+      HAPPIER_INSTALL_SCOPE: "cli,protocol,agents"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: false
+
+    - name: Setup Node.js
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.x
+
+    - name: Enable Corepack
+      uses: ./.github/actions/enable-corepack-yarn
+
+    - name: Install dependencies
+      uses: ./.github/actions/install-yarn-dependencies
+      with:
+        args: --frozen-lockfile --ignore-engines
+
+    # Keep RED first: adjacent checks and typechecks only run after the
+    # real command-to-HTTP identity contract succeeds.
+    - name: Session send identity regression
+      run: >-
+        yarn workspace @happier-dev/cli vitest run --config vitest.config.ts
+        --passWithNoTests=false --maxWorkers 2
+        src/cli/commands/session/send.localId.test.ts
+
+    - name: Adjacent CLI send and service tests
+      run: >-
+        yarn workspace @happier-dev/cli vitest run --config vitest.config.ts
+        --passWithNoTests=false --maxWorkers 2
+        src/cli/commands/session/send.actionExecutor.test.ts
+        src/cli/commands/session/handleSessionCommand.help.test.ts
+        src/session/actions/createCliActionDeps.sessionControls.test.ts
+        src/session/actions/createCliActionExecutor.test.ts
+        src/session/services/sendSessionMessage.test.ts
+        src/session/services/admitSessionUserMessage.test.ts
+
+    - name: Adjacent protocol action tests
+      run: >-
+        yarn workspace @happier-dev/protocol test --passWithNoTests=false --maxWorkers 2
+        src/actions/actionExecutor.sessionControl.test.ts src/actions/actionSpecs.test.ts
+
+    - name: CLI typecheck
+      run: yarn workspace @happier-dev/cli typecheck
+
+    - name: Protocol typecheck
+      run: yarn workspace @happier-dev/protocol typecheck
+
   smoke-test-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
