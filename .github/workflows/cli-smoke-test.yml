@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  session-send-local-id:
+  happier-cli-test:
     name: Session send local identity
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -46,15 +46,19 @@ jobs:
     # Keep RED first: adjacent checks and typechecks only run after the
     # real command-to-HTTP identity contract succeeds.
     - name: Session send identity regression
+      id: identity-tests
       run: >-
         yarn workspace @happier-dev/cli vitest run --config vitest.config.ts
         --passWithNoTests=false --maxWorkers 2
+        --reporter=default --reporter=json --outputFile.json=vitest-local-id.json
         src/cli/commands/session/send.localId.test.ts
 
     - name: Adjacent CLI send and service tests
+      id: cli-tests
       run: >-
         yarn workspace @happier-dev/cli vitest run --config vitest.config.ts
         --passWithNoTests=false --maxWorkers 2
+        --reporter=default --reporter=json --outputFile.json=vitest-send-adjacent.json
         src/cli/commands/session/send.actionExecutor.test.ts
         src/cli/commands/session/handleSessionCommand.help.test.ts
         src/session/actions/createCliActionDeps.sessionControls.test.ts
@@ -63,8 +67,10 @@ jobs:
         src/session/services/admitSessionUserMessage.test.ts
 
     - name: Adjacent protocol action tests
+      id: protocol-tests
       run: >-
         yarn workspace @happier-dev/protocol test --passWithNoTests=false --maxWorkers 2
+        --reporter=default --reporter=json --outputFile.json=vitest-send-actions.json
         src/actions/actionExecutor.sessionControl.test.ts src/actions/actionSpecs.test.ts
 
     - name: CLI typecheck
@@ -72,6 +78,71 @@ jobs:
 
     - name: Protocol typecheck
       run: yarn workspace @happier-dev/protocol typecheck
+
+    - name: Session send test balance
+      env:
+        IDENTITY_TESTS_OUTCOME: ${{ steps.identity-tests.outcome }}
+        CLI_TESTS_OUTCOME: ${{ steps.cli-tests.outcome }}
+        PROTOCOL_TESTS_OUTCOME: ${{ steps.protocol-tests.outcome }}
+      run: |
+        node <<'NODE'
+        const fs = require('node:fs');
+        const reports = [
+          ['apps/cli/vitest-local-id.json', process.env.IDENTITY_TESTS_OUTCOME],
+          ['apps/cli/vitest-send-adjacent.json', process.env.CLI_TESTS_OUTCOME],
+          ['packages/protocol/vitest-send-actions.json', process.env.PROTOCOL_TESTS_OUTCOME],
+        ];
+        const required = [
+          'apps/cli/src/cli/commands/session/send.localId.test.ts',
+          'apps/cli/src/cli/commands/session/send.actionExecutor.test.ts',
+          'apps/cli/src/cli/commands/session/handleSessionCommand.help.test.ts',
+          'apps/cli/src/session/actions/createCliActionDeps.sessionControls.test.ts',
+          'apps/cli/src/session/actions/createCliActionExecutor.test.ts',
+          'apps/cli/src/session/services/sendSessionMessage.test.ts',
+          'apps/cli/src/session/services/admitSessionUserMessage.test.ts',
+          'packages/protocol/src/actions/actionExecutor.sessionControl.test.ts',
+          'packages/protocol/src/actions/actionSpecs.test.ts',
+        ];
+        try {
+          const results = [];
+          let tests = 0;
+          let failed = 0;
+          let skipped = 0;
+          const outcomes = [];
+          for (const [file, outcome] of reports) {
+            const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (!Array.isArray(report.testResults) || report.testResults.length === 0
+              || !Number.isSafeInteger(report.numTotalTests) || report.numTotalTests <= 0
+              || !Number.isSafeInteger(report.numFailedTests) || report.numFailedTests < 0) {
+              throw new Error(`Empty or invalid Vitest report: ${file}`);
+            }
+            for (const result of report.testResults) {
+              if (typeof result.name !== 'string' || !Array.isArray(result.assertionResults)
+                || result.assertionResults.length === 0) {
+                throw new Error(`Missing file/test results in ${file}`);
+              }
+              results.push(result);
+              skipped += result.assertionResults.filter((test) => ['pending', 'skipped', 'todo'].includes(test.status)).length;
+            }
+            tests += report.numTotalTests;
+            failed += report.numFailedTests;
+            outcomes.push(outcome === 'success' && report.success === true);
+          }
+          const names = results.map((result) => result.name.replace(/\\/g, '/'));
+          const missing = required.filter((file) => !names.some((name) => name.endsWith(`/${file}`)));
+          const failedFiles = results.filter((result) => result.status === 'failed').length;
+          const success = outcomes.every(Boolean) && failed === 0 && failedFiles === 0
+            && missing.length === 0 && results.every((result) => result.status === 'passed'
+              && result.assertionResults.some((test) => test.status === 'passed')
+              && !result.assertionResults.some((test) => test.status === 'failed'));
+          console.log(`HAPPIER-CLI-BILANZ dateien=${names.length} tests=${tests} rot=${failed} dateirot=${failedFiles} pflicht=${required.length - missing.length}/${required.length} vitest=${success ? 'success' : 'failed'} skips=${skipped}`);
+          for (const file of missing) console.error(`PFLICHT FEHLT: ${file}`);
+          if (!success) process.exitCode = 1;
+        } catch (error) {
+          console.error(`HAPPIER-CLI: KEIN URTEIL - ${error.message}`);
+          process.exitCode = 1;
+        }
+        NODE
 
   smoke-test-linux:
     runs-on: ubuntu-latest
