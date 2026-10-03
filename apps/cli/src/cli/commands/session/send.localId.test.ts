@@ -127,7 +127,7 @@ describe('happier session send local identity (HTTP corridor)', () => {
     expect(result).toMatchObject({ ok: true, result: { ok: true, sessionId, localId: identity } });
   });
 
-  it.each(['', '   ', null, 42])('rejects invalid public action localId %j before HTTP admission', async (invalidLocalId) => {
+  it.each(['', '   ', null, 42, 'agent-transition:claim-1'])('rejects invalid public action localId %j before HTTP admission', async (invalidLocalId) => {
     const { createCliActionExecutorFromCredentials } = await import('@/session/actions/createCliActionExecutorFromCredentials');
     const executor = createCliActionExecutorFromCredentials({ credentials: await readCredentialsFn() });
     await expect(executor.execute('session.message.send', {
@@ -138,12 +138,24 @@ describe('happier session send local identity (HTTP corridor)', () => {
     expect(received).toEqual([]);
   });
 
+  it('rejects caller-supplied identity on the MCP surface before HTTP admission', async () => {
+    const { createCliActionExecutorFromCredentials } = await import('@/session/actions/createCliActionExecutorFromCredentials');
+    const executor = createCliActionExecutorFromCredentials({ credentials: await readCredentialsFn() });
+    await expect(executor.execute('session.message.send', {
+      sessionId, message: 'Action wake', localId,
+    }, { surface: 'mcp', defaultSessionId: null })).resolves.toMatchObject({
+      ok: false, errorCode: 'invalid_parameters',
+    });
+    expect(received).toEqual([]);
+  });
+
   it.each([
     ['send', sessionId, 'Board wake', '--local-id'],
     ['send', sessionId, 'Board wake', '--local-id', ''],
     ['send', sessionId, 'Board wake', '--local-id', '   '],
     ['send', sessionId, 'Board wake', '--local-id', '--json'],
-  ])('rejects a missing or blank --local-id before reading credentials: %j', async (...argv) => {
+    ['send', sessionId, 'Board wake', '--local-id', 'agent-transition:claim-1'],
+  ])('rejects a missing, blank or reserved --local-id before reading credentials: %j', async (...argv) => {
     const { cmdSessionSend } = await import('./send');
     const readCredentials = vi.fn(readCredentialsFn);
     await expect(cmdSessionSend(argv, { readCredentialsFn: readCredentials }))
