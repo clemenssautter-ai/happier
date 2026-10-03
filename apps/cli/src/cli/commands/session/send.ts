@@ -2,6 +2,7 @@ import chalk from 'chalk';
 
 import { parsePermissionIntentAlias } from '@happier-dev/agents';
 import type { PermissionIntent } from '@happier-dev/agents';
+import { isSessionAgentTransitionDividerLocalId, readPendingLocalId } from '@happier-dev/protocol';
 
 import type { Credentials } from '@/persistence';
 import { wantsJson, printJsonEnvelope, writeJsonStdout } from '@/cli/output/jsonEnvelope';
@@ -26,12 +27,24 @@ export async function cmdSessionSend(
   const json = wantsJson(argv);
   const [idOrPrefix = '', message = ''] = readCommandPositionals(argv, {
     startIndex: 1,
-    valueFlags: ['--permission-mode', '--model', '--timeout'],
+    valueFlags: ['--permission-mode', '--model', '--timeout', '--local-id'],
   });
   const wait = hasFlag(argv, '--wait');
   const timeoutSecondsRaw = readIntFlagValue(argv, '--timeout', { min: 1 });
   const permissionModeFlag = (readFlagValue(argv, '--permission-mode') ?? '').trim();
   const modelFlagRaw = readFlagValue(argv, '--model');
+  const localIdFlagIndex = argv.indexOf('--local-id');
+  const localIdRaw = localIdFlagIndex >= 0 ? argv[localIdFlagIndex + 1] : undefined;
+  const localId = readPendingLocalId(localIdRaw);
+  if (localIdFlagIndex >= 0 && (
+    localId === null
+    || localIdRaw?.startsWith('-')
+    || isSessionAgentTransitionDividerLocalId(localId)
+  )) {
+    const err = new Error('Invalid --local-id');
+    (err as Error & { code?: string }).code = 'invalid_arguments';
+    throw err;
+  }
   const hasModelFlag = modelFlagRaw !== null;
   const modelFlag = typeof modelFlagRaw === 'string' ? modelFlagRaw.trim() : '';
   const timeoutSeconds =
@@ -40,7 +53,7 @@ export async function cmdSessionSend(
       : 300;
 
   if (!idOrPrefix || !message) {
-    throw new Error('Usage: happier session send <session-id-or-prefix> <message> [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
+    throw new Error('Usage: happier session send <session-id-or-prefix> <message> [--local-id <id>] [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
   }
 
   const credentials = await deps.readCredentialsFn();
@@ -72,6 +85,7 @@ export async function cmdSessionSend(
     {
       sessionId: idOrPrefix,
       message,
+      ...(localId !== null ? { localId } : {}),
       ...(permissionModeOverride ? { permissionModeOverride } : {}),
       ...(modelOverride !== undefined ? { modelOverride } : {}),
       ...(wait ? { wait: true } : {}),
