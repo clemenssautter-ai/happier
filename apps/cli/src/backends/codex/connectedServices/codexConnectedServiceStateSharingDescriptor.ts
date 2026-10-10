@@ -9,7 +9,7 @@ export const codexConnectedServiceStateSharingDescriptor = {
     entries: [
       { path: 'config.toml', mode: 'force_copied' },
       { path: 'environments.toml', mode: 'linked_or_copied' },
-      { path: 'hooks.json', mode: 'linked_or_copied' },
+      { path: 'hooks.json', mode: 'force_copied' },
       { path: 'AGENTS.md', mode: 'linked_or_copied' },
       { path: 'AGENTS.override.md', mode: 'linked_or_copied' },
       { path: 'instructions.md', mode: 'linked_or_copied' },

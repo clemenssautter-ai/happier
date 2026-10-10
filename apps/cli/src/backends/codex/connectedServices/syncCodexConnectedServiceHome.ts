@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, open, readdir, rm } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import {
   resolveConnectedServicesProviderStateSharingPolicyV1,
@@ -79,6 +79,166 @@ function dedupeEntries(entries: readonly string[]): string[] {
     result.push(entry);
   }
   return result;
+}
+
+type CodexHookTrustSection = Readonly<{
+  key: string;
+  body: string;
+  trustedHash?: string;
+  enabled?: boolean;
+}>;
+type CodexHookTrustSnapshot = Readonly<{
+  hooksPath: string;
+  hooksBytes: Buffer | null;
+  sections: readonly CodexHookTrustSection[];
+}>;
+
+// Restore the deployed 68f18b5e01/429ebae0f7 intent at its provider owner.
+// These are native flat hooks.state sections, not a general TOML parser.
+function codexHookTrustKey(line: string): string | null {
+  const match = /^\s*\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*(?:#.*)?$/.exec(line);
+  if (!match) return null;
+  try {
+    const value: unknown = JSON.parse(match[1]);
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexHookTrustSections(content: string, hooksPath: string): readonly CodexHookTrustSection[] {
+  const sections: CodexHookTrustSection[] = [];
+  let key: string | null = null;
+  let body: string[] = [];
+  let trustedHash: string | undefined;
+  let enabled: boolean | undefined;
+  const flush = () => {
+    if (key !== null && (trustedHash !== undefined || enabled !== undefined)) {
+      sections.push({ key, body: `${body.join('\n').trimEnd()}\n`, trustedHash, enabled });
+    }
+  };
+  for (const line of content.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) {
+      flush();
+      const candidate = codexHookTrustKey(line);
+      key = candidate?.startsWith(`${hooksPath}:`) ? candidate : null;
+      body = [];
+      trustedHash = undefined;
+      enabled = undefined;
+      continue;
+    }
+    if (key === null) continue;
+    body.push(line);
+    const enabledMatch = /^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$/.exec(line);
+    if (enabledMatch) {
+      enabled = enabledMatch[1] === 'true';
+      continue;
+    }
+    const match = /^\s*trusted_hash\s*=\s*("(?:[^"\\]|\\.)*")\s*(?:#.*)?$/.exec(line);
+    if (!match) continue;
+    try {
+      const value: unknown = JSON.parse(match[1]);
+      trustedHash = typeof value === 'string' ? value : undefined;
+      if (trustedHash !== undefined) body[body.length - 1] = `trusted_hash = ${JSON.stringify(trustedHash)}`;
+    } catch {
+      trustedHash = undefined;
+    }
+  }
+  flush();
+  return sections;
+}
+
+async function canonicalCodexHome(home: string): Promise<string> {
+  const suffix: string[] = [];
+  let existing = resolve(home);
+  for (;;) {
+    try {
+      return join(await realpath(existing), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw error;
+      suffix.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+async function optionalHookBytes(path: string, requireCopy = false): Promise<Buffer | null> {
+  try {
+    const stats = await lstat(path);
+    if (requireCopy && !stats.isFile()) return null;
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function readCodexHookTrustSnapshot(home: string): Promise<CodexHookTrustSnapshot> {
+  const canonicalHome = await canonicalCodexHome(home);
+  const hooksFile = join(canonicalHome, 'hooks.json');
+  const hooksBytes = await optionalHookBytes(hooksFile);
+  const hooksPath = hooksBytes === null ? hooksFile : await realpath(hooksFile);
+  let config = '';
+  try {
+    config = await readFile(join(canonicalHome, 'config.toml'), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  }
+  return { hooksPath, hooksBytes, sections: codexHookTrustSections(config, hooksPath) };
+}
+
+function remapCodexHookTrustSections(snapshot: CodexHookTrustSnapshot, hooksPath: string): readonly CodexHookTrustSection[] {
+  return snapshot.sections.map((section) => ({
+    ...section,
+    key: `${hooksPath}${section.key.slice(snapshot.hooksPath.length)}`,
+  }));
+}
+
+function mergeCodexHookTrustSections(base: readonly CodexHookTrustSection[], preferred: readonly CodexHookTrustSection[]): readonly CodexHookTrustSection[] {
+  const byKey = new Map(base.map((section) => [section.key, section]));
+  for (const section of preferred) {
+    const previous = byKey.get(section.key);
+    // Native enablement and trust are independent. Explicit source fields win;
+    // absent fields retain profile state for the same unchanged hook bytes.
+    let body = section.body;
+    if (section.trustedHash === undefined && previous?.trustedHash !== undefined) {
+      body = `trusted_hash = ${JSON.stringify(previous.trustedHash)}\n${body}`;
+    }
+    if (section.enabled === undefined && previous?.enabled !== undefined) {
+      body = `${body}enabled = ${previous.enabled}\n`;
+    }
+    byKey.set(section.key, {
+      ...section,
+      body,
+      trustedHash: section.trustedHash ?? previous?.trustedHash,
+      enabled: section.enabled ?? previous?.enabled,
+    });
+  }
+  return [...byKey.values()];
+}
+
+async function restoreCodexHookTrustSections(home: string, sections: readonly CodexHookTrustSection[]): Promise<boolean> {
+  if (sections.length === 0) return false;
+  const configPath = join(home, 'config.toml');
+  let config = 'cli_auth_credentials_store = "file"\n';
+  try {
+    config = await readFile(configPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+  }
+  const replaced = new Set(sections.map((section) => section.key));
+  let skip = false;
+  const retained: string[] = [];
+  for (const line of config.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) skip = replaced.has(codexHookTrustKey(line) ?? '');
+    if (!skip) retained.push(line);
+  }
+  const base = retained.join('\n').trimEnd();
+  await writeFile(configPath, `${base}${base ? '\n\n' : ''}${sections.map((section) =>
+    `[hooks.state.${JSON.stringify(section.key)}]\n${section.body}`).join('\n')}`, 'utf8');
+  return true;
 }
 
 async function resolveCodexConfigEntryNames(sourceCodexHome: string): Promise<readonly string[]> {
@@ -220,6 +380,9 @@ export async function syncCodexConnectedServiceHome(params: Readonly<{
 
     await mkdir(params.destinationCodexHome, { recursive: true });
     const manifest = await readConnectedServiceStateSharingManifest(params.destinationCodexHome);
+    const effectiveCodexHome = await canonicalCodexHome(params.previousCodexHome ?? params.destinationCodexHome);
+    const previousHookTrust = settings.configMode === 'isolated'
+      ? null : await readCodexHookTrustSnapshot(effectiveCodexHome);
     const configEntryNames = await resolveCodexConfigEntryNames(sourceCodexHome);
     const stateEntryNames = codexConnectedServiceStateSharingDescriptor.state.entries.map((entry) => entry.path);
 
@@ -270,7 +433,23 @@ export async function syncCodexConnectedServiceHome(params: Readonly<{
       }),
     });
 
-    await writeConnectedServiceStateSharingManifest(params.destinationCodexHome, applyResult.manifest);
+    let restoredHookTrust = false;
+    if (settings.configMode !== 'isolated') {
+      const copiedHooks = await optionalHookBytes(join(params.destinationCodexHome, 'hooks.json'), true);
+      const nativeHookTrust = await readCodexHookTrustSnapshot(sourceCodexHome);
+      const finalHooksPath = join(effectiveCodexHome, 'hooks.json');
+      const retained = copiedHooks !== null && previousHookTrust !== null
+        && previousHookTrust.hooksBytes !== null && previousHookTrust.hooksBytes.equals(copiedHooks)
+        ? remapCodexHookTrustSections(previousHookTrust, finalHooksPath) : [];
+      const transferred = copiedHooks !== null && nativeHookTrust.hooksBytes?.equals(copiedHooks)
+        ? remapCodexHookTrustSections(nativeHookTrust, finalHooksPath) : [];
+      restoredHookTrust = await restoreCodexHookTrustSections(params.destinationCodexHome,
+        mergeCodexHookTrustSections(retained, transferred));
+    }
+    const nextManifest = restoredHookTrust && !applyResult.manifest.configEntries.includes('config.toml')
+      ? { ...applyResult.manifest, configEntries: [...applyResult.manifest.configEntries, 'config.toml'] }
+      : applyResult.manifest;
+    await writeConnectedServiceStateSharingManifest(params.destinationCodexHome, nextManifest);
     await removeLegacyConnectedServiceStateSharingManifest(params.destinationCodexHome);
 
     return {
