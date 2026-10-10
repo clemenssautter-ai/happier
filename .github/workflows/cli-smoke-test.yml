@@ -15,7 +15,7 @@ on:
 
 jobs:
   happier-cli-test:
-    name: Session send local identity
+    name: Codex hook trust and session send identity
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -43,8 +43,17 @@ jobs:
       with:
         args: --frozen-lockfile --ignore-engines
 
-    # Keep RED first: adjacent checks and typechecks only run after the
-    # real command-to-HTTP identity contract succeeds.
+    # Keep the owning regressions first: adjacent checks and typechecks only
+    # run after hook materialization and command-to-HTTP identity succeed.
+    - name: Codex hook trust materialization regression
+      id: codex-hook-tests
+      run: >-
+        yarn workspace @happier-dev/cli vitest run --config vitest.config.ts
+        --passWithNoTests=false --maxWorkers 2
+        --reporter=default --reporter=json --outputFile.json=vitest-codex-hook-trust.json
+        src/backends/codex/connectedServices/syncCodexConnectedServiceHome.test.ts
+        src/daemon/connectedServices/stateSharing/applyConnectedServiceStateSharingDescriptor.test.ts
+
     - name: Session send identity regression
       id: identity-tests
       run: >-
@@ -79,8 +88,10 @@ jobs:
     - name: Protocol typecheck
       run: yarn workspace @happier-dev/protocol typecheck
 
-    - name: Session send test balance
+    - name: CLI test balance
+      if: always()
       env:
+        CODEX_HOOK_TESTS_OUTCOME: ${{ steps.codex-hook-tests.outcome }}
         IDENTITY_TESTS_OUTCOME: ${{ steps.identity-tests.outcome }}
         CLI_TESTS_OUTCOME: ${{ steps.cli-tests.outcome }}
         PROTOCOL_TESTS_OUTCOME: ${{ steps.protocol-tests.outcome }}
@@ -88,11 +99,14 @@ jobs:
         node <<'NODE'
         const fs = require('node:fs');
         const reports = [
+          ['apps/cli/vitest-codex-hook-trust.json', process.env.CODEX_HOOK_TESTS_OUTCOME],
           ['apps/cli/vitest-local-id.json', process.env.IDENTITY_TESTS_OUTCOME],
           ['apps/cli/vitest-send-adjacent.json', process.env.CLI_TESTS_OUTCOME],
           ['packages/protocol/vitest-send-actions.json', process.env.PROTOCOL_TESTS_OUTCOME],
         ];
         const required = [
+          'apps/cli/src/backends/codex/connectedServices/syncCodexConnectedServiceHome.test.ts',
+          'apps/cli/src/daemon/connectedServices/stateSharing/applyConnectedServiceStateSharingDescriptor.test.ts',
           'apps/cli/src/cli/commands/session/send.localId.test.ts',
           'apps/cli/src/cli/commands/session/send.actionExecutor.test.ts',
           'apps/cli/src/cli/commands/session/handleSessionCommand.help.test.ts',
@@ -110,6 +124,10 @@ jobs:
           let skipped = 0;
           const outcomes = [];
           for (const [file, outcome] of reports) {
+            if (!fs.existsSync(file) && (!outcome || outcome === 'skipped')) {
+              outcomes.push(false);
+              continue;
+            }
             const report = JSON.parse(fs.readFileSync(file, 'utf8'));
             if (!Array.isArray(report.testResults) || report.testResults.length === 0
               || !Number.isSafeInteger(report.numTotalTests) || report.numTotalTests <= 0
